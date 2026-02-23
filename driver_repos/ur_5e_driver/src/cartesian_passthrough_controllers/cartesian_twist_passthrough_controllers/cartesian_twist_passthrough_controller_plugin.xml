@@ -1,0 +1,11 @@
+<library path="cartesian_twist_passthrough_controller">
+
+  <class name="cartesian_twist_passthrough_controller/CartesianTwistPassthroughController"
+         type="cartesian_twist_passthrough_controller::CartesianTwistPassthroughController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Steer your robot's end-effector with twists in Cartesian space.
+    </description>
+  </class>
+
+</library>

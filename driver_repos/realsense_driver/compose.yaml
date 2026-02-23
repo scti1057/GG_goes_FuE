@@ -1,0 +1,19 @@
+services:
+  realsense_driver:
+    build: .
+    image: realsense_driver:local
+    container_name: camera_driver
+    privileged: true
+    network_mode: host
+    environment:
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=0
+      - QT_X11_NO_MITSHM=1
+      - XAUTHORITY=${XAUTHORITY}
+    volumes:
+      - ${XAUTHORITY}:${XAUTHORITY}:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev:/dev
+    entrypoint: ["/home/ros/ros2_ws/startup_scripts/realsense_entrypoint_filter.sh"]
+    tty: true
+    stdin_open: true

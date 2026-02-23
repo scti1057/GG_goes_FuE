@@ -1,0 +1,11 @@
+<library path="cartesian_pose_passthrough_controller">
+
+  <class name="cartesian_pose_passthrough_controller/CartesianPosePassthroughController"
+         type="cartesian_pose_passthrough_controller::CartesianPosePassthroughController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Steer your robot's end-effector with poses in Cartesian space.
+    </description>
+  </class>
+
+</library>

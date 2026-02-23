@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="adapterplatte_ftsensor_schubhebel">
+    <xacro:arg name="s" default="0.001" />
+
+    <link name="adapterplatte_ftsensor_schubhebel">
+    <visual>
+        <origin xyz="0 0 ${0.014}" rpy="0 ${pi/2} 0" />
+        <geometry>
+            <!-- <cylinder length="0.014" radius="${0.0828/2}"/> -->
+            <mesh filename="package://pipe2/meshes/akio_axial80_iso050.stl" scale="$(arg s) $(arg s) $(arg s)"/>
+        </geometry>
+    </visual>
+    <collision>
+        <origin xyz="0 0 ${0.014}" rpy="0 ${pi/2} 0" />
+        <geometry>
+            <!-- <cylinder length="0.014" radius="${0.0828/2}"/> -->
+            <mesh filename="package://pipe2/meshes/akio_axial80_iso050.stl" scale="$(arg s) $(arg s) $(arg s)"/>
+        </geometry>
+    </collision>
+    </link>
+
+</robot>

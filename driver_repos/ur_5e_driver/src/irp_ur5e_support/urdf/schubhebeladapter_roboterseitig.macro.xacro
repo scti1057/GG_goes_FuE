@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="schubhebeladapter_roboterseitig">
+    <xacro:arg name="s" default="0.001" />
+
+    <link name="schubhebeladapter_roboterseitig">
+    <visual>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0" />
+        <geometry>
+            <mesh filename="package://pipe2/meshes/schubhebeladapter_roboterseitig_bin.stl" scale="$(arg s) $(arg s) $(arg s)"/>
+        </geometry>
+    </visual>
+    <collision>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0" />
+        <geometry>
+            <mesh filename="package://pipe2/meshes/schubhebeladapter_roboterseitig_bin.stl" scale="$(arg s) $(arg s) $(arg s)"/>
+        </geometry>
+    </collision>
+    </link>
+
+</robot>

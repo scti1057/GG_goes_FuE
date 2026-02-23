@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package format="3"> <!-- standard package format for ros2 = 3 -->
+  <name>irp_ur5e_support</name>
+  <version>0.0.0</version>
+  <description>The irp_ur5e_support package</description>
+
+  <maintainer email="iaps@todo.todo">iaps</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend> 
+  <!-- since this package contains application with both C++ and python code its better to go with cmake package to be build-->
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>rclcpp</build_depend>
+  <build_depend>rclpy</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>trajectory_msgs</build_depend>
+  <build_depend>control_msgs</build_depend>
+  <build_depend>controller_manager</build_depend>
+  <build_depend>action_msgs</build_depend>
+  <build_depend>rosidl_default_generators</build_depend>
+ <!--  <build_depend>moveit_commander</build_depend> -->
+  <build_export_depend>geometry_msgs</build_export_depend>
+  <build_export_depend>rclcpp</build_export_depend>
+  <build_export_depend>rclpy</build_export_depend>
+  <build_export_depend>std_msgs</build_export_depend>
+  <build_export_depend>trajectory_msgs</build_export_depend>
+  <build_export_depend>control_msgs</build_export_depend>
+  <build_export_depend>controller_manager</build_export_depend>
+  <build_export_depend>action_msgs</build_export_depend>
+<!--   <build_export_depend>moveit_commander</build_export_depend> -->
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>rclcpp</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>moveit_commander</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+
+   <depend>irp_ur5e_interfaces</depend>
+   <depend>rclcpp_action</depend>
+  <!-- The export tag contains other, unspecified, tags -->
+  <export>
+    <!-- Other tools can request additional information be placed here -->
+    <build_type>ament_cmake</build_type>
+    <member_of_group>rosidl_interface_packages</member_of_group>
+  </export>
+</package>

@@ -1,0 +1,8 @@
+#goal definition
+geometry_msgs/Wrench wrench
+---
+#result definition
+bool success
+---
+#feedback
+geometry_msgs/Twist twist

@@ -1,0 +1,8 @@
+#goal definition
+trajectory_msgs/JointTrajectoryPoint point
+---
+#result definition
+bool success
+---
+#feedback
+trajectory_msgs/JointTrajectoryPoint point

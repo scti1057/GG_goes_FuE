@@ -1,0 +1,24 @@
+<launch>
+    <!-- Load controller and hardware configuration -->
+    <rosparam file="$(find irp_ur5e_support)/config/my_ur5e_controllers.yaml" command="load" />
+
+    <!-- Spawn initial controller -->
+    <node
+        name="controller_spawner_initial"
+        pkg="controller_manager"
+        exec="spawner"
+        output="screen"
+        args="twist_controller"
+    />
+
+    <!-- Spawn stopped controller -->
+    <node
+        name="controller_spawner_stopped"
+        pkg="controller_manager"
+        exec="spawner"
+        output="screen"
+        args="--stopped scaled_pos_joint_traj_controller"
+    />
+</launch>
+
+

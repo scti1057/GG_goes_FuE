@@ -1,0 +1,62 @@
+<launch>
+    <!-- Configuration -->
+    <arg name="rviz" default="true"/>
+    <arg name="debug" default="false"/>
+    <arg if="$(arg debug)" name="launch-prefix" value="screen -d -m gdb -command=$(env HOME)/.ros/my_debug_log --ex run --args"/>
+    <arg unless="$(arg debug)" name="launch-prefix" value=""/>
+
+    <!-- Load robot_description to parameter server -->
+    <param name="/robot_description" command="$(find xacro)/xacro '$(find ur_description)/urdf/ur5e.xacro'" />
+
+    <!-- Load controller and hardware configuration -->
+    <rosparam file="$(find irp_ur5e_support)/config/my_ur5e_controllers.yaml" command="load" />
+
+    <!-- Load hardware interface -->
+    <node
+        name="sim_hardware_interface"
+        pkg="ros_control_boilerplate"
+        exec="sim_hw_main"
+        output="screen"
+        launch-prefix="$(arg launch-prefix)"
+    >
+        <!-- Control motion and compliance controller with one handle -->
+        <!--
+        <remap from="my_motion_control_handle/target_frame" to="target_frame"/>
+        <remap from="my_cartesian_motion_controller/target_frame" to="target_frame"/>
+        <remap from="my_cartesian_compliance_controller/target_frame" to="target_frame"/>
+        -->
+        <!-- Control wrenches via one topic -->
+        <!--
+        <remap from="my_cartesian_force_controller/target_wrench" to="target_wrench"/>
+        <remap from="my_cartesian_compliance_controller/target_wrench" to="target_wrench"/>
+        -->
+    </node>
+
+    <!-- Robot state publisher -->
+    <node
+        name="robot_state_publisher"
+        pkg="robot_state_publisher"
+        exec="robot_state_publisher"
+    >
+        <param name="publish_frequency" type="double" value="50.0"/>
+        <param name="tf_prefix" type="string" value=""/>
+    </node>
+
+    <!-- Joint state controller spawner -->
+    <node
+        name="joint_state_controller_spawner"
+        pkg="controller_manager"
+        exec="spawner"
+        args="joint_state_controller"
+        respawn="false"
+        output="screen"
+    />
+
+    <!-- Spawn initial controller -->
+    <node
+        name="controller_spawner_initial"
+        pkg="controller_manager"
+        exec="spawner"
+        args="joint_based_cartesian_traj_controller"
+        output="screen"
+    />

@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>cartesian_pose_passthrough_controller</name>
+  <version>0.0.0</version>
+  <description>The cartesian_pose_passthrough package</description>
+  <maintainer email="dominik.werman@h-ka.de">Dominik Werman</maintainer>
+  <license>Apache 2.0</license>
+  <url type="repository">https://github.com/fzi-forschungszentrum-informatik/cartesian_controllers</url>
+  <author email="dominik.werman@h-ka.de">Dominik Werman</author>
+
+  <depend>rclcpp</depend>
+  <depend>tf2</depend>
+  <depend>controller_interface</depend>
+  <depend>cartesian_passthrough_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <controller_interface plugin="${prefix}/cartesian_pose_passthrough_controller_plugin.xml"/>
+  </export>
+</package>

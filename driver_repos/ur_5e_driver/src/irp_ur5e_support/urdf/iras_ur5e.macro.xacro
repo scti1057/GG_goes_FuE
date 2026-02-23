@@ -1,0 +1,203 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+   <!-- robot name parameter -->
+   <xacro:arg name="name" default="ur"/>
+   <!-- import main macro -->
+   <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
+   <!-- <xacro:include filename="$(find iras_ur5e_support)/urdf/ftn_axia80.macro.xacro"/> -->
+   <xacro:include filename="$(find pipe2)/urdf/adapterplatte_roboter_ftsensor.macro.xacro"/>
+   <xacro:include filename="$(find pipe2)/urdf/adapterplatte_ftsensor_schubhebel.macro.xacro"/>
+   <xacro:include filename="$(find pipe2)/urdf/schubhebeladapter_roboterseitig.macro.xacro"/>
+   <xacro:include filename="$(find pipe2)/urdf/schubhebeladapter_werkzeugseitig.macro.xacro"/>
+   <xacro:include filename="$(find pipe2)/urdf/egh80_gripper.macro.xacro"/>
+   <xacro:include filename="$(find net_ft_description)/urdf/net_ft_sensor_macro.urdf.xacro" />
+
+   <!-- parameters ftn-axia80 sensor -->
+   <xacro:arg name="ip_address" default="192.168.1.120" />
+   <xacro:arg name="rdt_sampling_rate" default="500" />
+   <xacro:arg name="sensor_type" default="ati_axia" />
+   <xacro:arg name="internal_filter_rate" default="0" />
+   <xacro:arg name="use_hardware_biasing" default="true" />
+
+   <!-- possible 'ur_type' values: ur3, ur3e, ur5, ur5e, ur10, ur10e, ur16e -->
+   <!-- the default value should raise an error in case this was called without defining the type -->
+   <xacro:arg name="ur_type" default="ur5x"/>
+
+   <!-- parameters -->
+   <xacro:arg name="tf_prefix" default="" />
+   <xacro:arg name="joint_limit_params" default="$(find ur_description)/config/$(arg ur_type)/joint_limits.yaml"/>
+   <xacro:arg name="kinematics_params" default="$(find ur_description)/config/$(arg ur_type)/default_kinematics.yaml"/>
+   <xacro:arg name="physical_params" default="$(find ur_description)/config/$(arg ur_type)/physical_parameters.yaml"/>
+   <xacro:arg name="visual_params" default="$(find ur_description)/config/$(arg ur_type)/visual_parameters.yaml"/>
+   <xacro:arg name="transmission_hw_interface" default=""/>
+   <xacro:arg name="safety_limits" default="false"/>
+   <xacro:arg name="safety_pos_margin" default="0.15"/>
+   <xacro:arg name="safety_k_position" default="20"/>
+   <!-- ros2_control related parameters -->
+   <xacro:arg name="headless_mode" default="false" />
+   <xacro:arg name="robot_ip" default="0.0.0.0" />
+   <xacro:arg name="script_filename" default=""/>
+   <xacro:arg name="output_recipe_filename" default=""/>
+   <xacro:arg name="input_recipe_filename" default=""/>
+   <xacro:arg name="reverse_ip" default="0.0.0.0"/>
+   <xacro:arg name="script_command_port" default="50004"/>
+   <!--   tool communication related parameters-->
+   <xacro:arg name="use_tool_communication" default="false" />
+   <xacro:arg name="tool_voltage" default="0" />
+   <xacro:arg name="tool_parity" default="0" />
+   <xacro:arg name="tool_baud_rate" default="115200" />
+   <xacro:arg name="tool_stop_bits" default="1" />
+   <xacro:arg name="tool_rx_idle_chars" default="1.5" />
+   <xacro:arg name="tool_tx_idle_chars" default="3.5" />
+   <xacro:arg name="tool_device_name" default="/tmp/ttyUR" />
+   <xacro:arg name="tool_tcp_port" default="54321" />
+
+     <!-- Simulation parameters -->
+   <xacro:arg name="use_mock_hardware" default="false" />
+   <xacro:arg name="mock_sensor_commands" default="false" />
+   <xacro:arg name="sim_gazebo" default="false" />
+   <xacro:arg name="sim_ignition" default="false" />
+   <xacro:arg name="simulation_controllers" default="" />
+
+   <!-- initial position for simulations (Mock Hardware, Gazebo, Ignition) -->
+   <xacro:arg name="initial_positions_file" default="$(find ur_description)/config/initial_positions.yaml"/>
+
+   <!-- convert to property to use substitution in function -->
+   <xacro:property name="initial_positions_file" default="$(arg initial_positions_file)"/>
+
+   <!-- create link fixed to the "world" -->
+   <link name="world" />
+
+   <!-- arm -->
+   <xacro:ur_robot
+     name="$(arg name)"
+     tf_prefix="$(arg tf_prefix)"
+     parent="world"
+     joint_limits_parameters_file="$(arg joint_limit_params)"
+     kinematics_parameters_file="$(arg kinematics_params)"
+     physical_parameters_file="$(arg physical_params)"
+     visual_parameters_file="$(arg visual_params)"
+     transmission_hw_interface="$(arg transmission_hw_interface)"
+     safety_limits="$(arg safety_limits)"
+     safety_pos_margin="$(arg safety_pos_margin)"
+     safety_k_position="$(arg safety_k_position)"
+     use_fake_hardware="$(arg use_fake_hardware)"
+     fake_sensor_commands="$(arg fake_sensor_commands)"
+     sim_gazebo="$(arg sim_gazebo)"
+     sim_ignition="$(arg sim_ignition)"
+     headless_mode="$(arg headless_mode)"
+     initial_positions="${xacro.load_yaml(initial_positions_file)}"
+     use_tool_communication="$(arg use_tool_communication)"
+     tool_voltage="$(arg tool_voltage)"
+     tool_parity="$(arg tool_parity)"
+     tool_baud_rate="$(arg tool_baud_rate)"
+     tool_stop_bits="$(arg tool_stop_bits)"
+     tool_rx_idle_chars="$(arg tool_rx_idle_chars)"
+     tool_tx_idle_chars="$(arg tool_tx_idle_chars)"
+     tool_device_name="$(arg tool_device_name)"
+     tool_tcp_port="$(arg tool_tcp_port)"
+     robot_ip="$(arg robot_ip)"
+     script_filename="$(arg script_filename)"
+     output_recipe_filename="$(arg output_recipe_filename)"
+     input_recipe_filename="$(arg input_recipe_filename)"
+     reverse_ip="$(arg reverse_ip)"
+     script_command_port="$(arg script_command_port)"
+     >
+     <origin xyz="0 0 0" rpy="0 0 0" />          <!-- position robot in the world -->
+   </xacro:ur_robot>
+
+   <xacro:if value="$(arg sim_gazebo)">
+    <!-- Gazebo plugins -->
+    <gazebo reference="world">
+    </gazebo>
+    <gazebo>
+      <plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control">
+        <parameters>$(arg simulation_controllers)</parameters>
+      </plugin>
+    </gazebo>
+  </xacro:if>
+
+  <xacro:if value="$(arg sim_ignition)">
+    <!-- Gazebo plugins -->
+    <gazebo reference="world">
+    </gazebo>
+    <gazebo>
+      <plugin filename="libign_ros2_control-system.so" name="ign_ros2_control::IgnitionROS2ControlPlugin">
+        <parameters>$(arg simulation_controllers)</parameters>
+        <controller_manager_node_name>$(arg tf_prefix)controller_manager</controller_manager_node_name>
+      </plugin>
+    </gazebo>
+  </xacro:if>
+
+
+    <!-- iras workcell specific -->
+    <joint name="tool0_to_adapterplatte" type="fixed">
+        <origin xyz="0 0 0" rpy="0 0 ${pi/2}" />
+        <axis xyz="0 0 1" />
+        <parent link="tool0" />
+        <child link="adapterplatte_roboter_ftsensor" />
+    </joint>
+
+    <!-- <joint name="adapterplatte_to_ft" type="fixed">
+        <origin xyz="0 0 0.021" rpy="0 0 0" />
+        <axis xyz="0 0 1" />
+        <parent link="adapterplatte_roboter_ftsensor" />
+        <child link="ftn_axia80" />
+    </joint> -->
+
+    <xacro:net_ft_sensor
+      parent="adapterplatte_roboter_ftsensor"
+      prefix=""
+      ip_address="$(arg ip_address)"
+      rdt_sampling_rate="$(arg rdt_sampling_rate)"
+      sensor_type="$(arg sensor_type)"
+      internal_filter_rate="$(arg internal_filter_rate)"
+      use_hardware_biasing="$(arg use_hardware_biasing)">
+        <origin xyz="0 0 0.021" rpy="0 0 ${pi}" />
+    </xacro:net_ft_sensor>
+
+    <!-- <link name="ft_frame_axia80" />pi
+    <joint name="ft_to_ftsensorframe" type="fixed">
+        <origin xyz="0 0 0.0254" rpy="0 0 0" />
+        <axis xyz="0 0 1" />
+        <parent link="ftn_axia80" />
+        <child link="ft_frame_axia80" />
+    </joint> -->
+
+    <joint name="ft_to_adapterplatte" type="fixed">
+        <origin xyz="0 0 0" rpy="0 0 0" />
+        <axis xyz="0 0 1" />
+        <parent link="tool_mount_link" />
+        <child link="adapterplatte_ftsensor_schubhebel" />
+    </joint>
+
+    <joint name="adapterplatte_to_schubhebel" type="fixed">
+        <origin xyz="0 0 0.014" rpy="0 0 0" />
+        <axis xyz="0 0 1" />
+        <parent link="adapterplatte_ftsensor_schubhebel" />
+        <child link="schubhebeladapter_roboterseitig" />
+    </joint>
+
+    <joint name="schubhebelrob_to_schubhebelwerk" type="fixed">
+        <origin xyz="0 0 0.0265" rpy="0 0 0" />
+        <axis xyz="0 0 1" />
+        <parent link="schubhebeladapter_roboterseitig" />
+        <child link="schubhebeladapter_werkzeugseitig" />
+    </joint>
+
+    <joint name="schubhebelwerk_to_egh80gripper" type="fixed">
+        <origin xyz="0 0 0.016" rpy="0 0 0" />
+        <axis xyz="0 0 1" />
+        <parent link="schubhebeladapter_werkzeugseitig" />
+        <child link="egh80_gripper" />
+    </joint>
+
+    <link name="tool_egh80" />
+    <joint name="gripper_to_tool" type="fixed">
+        <origin xyz="0 0 0.1875" rpy="0 0 ${-pi/2}" />
+        <axis xyz="0 0 1" />
+        <parent link="egh80_gripper" />
+        <child link="tool_egh80" />
+    </joint>
+
+</robot>

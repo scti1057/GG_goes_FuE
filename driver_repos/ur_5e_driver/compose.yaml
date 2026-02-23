@@ -1,0 +1,15 @@
+services:
+  ur_driver:
+      image: irp-nas.fox-stairs.ts.net/hardware_drivers/ur_driver:jazzy
+      container_name: ros2_ur_driver
+      environment:
+        - ROBOT_IP=192.168.1.100
+        - AXIA_FT_IP=192.168.1.120
+      volumes:
+        - ./deps/ur_description_files/urdf/ur_macro.xacro:/home/ros_ws/src/Universal_Robots_ROS2_Description/urdf/ur_macro.xacro  # Mount local folder overwriting the standard description package
+        - ./deps/ros2_control_configs/ur_5e_axia_controller.yaml:/home/ros_ws/src/Universal_Robots_ROS2_Driver/ur_robot_driver/config/ur_controllers.yaml # Overwrite the controller config file
+      network_mode: host
+      entrypoint: ["/startup_scripts/ur5e_moveTwist_entrypoint.sh"] # Choose your needed startup script
+
+      tty: true
+      stdin_open: true

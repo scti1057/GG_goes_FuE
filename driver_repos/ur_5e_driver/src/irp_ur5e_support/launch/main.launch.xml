@@ -1,0 +1,39 @@
+<launch>
+    <!-- start ur5e robot driver -->
+    <include file="$(find ur_robot_driver)/launch/ur5e_bringup.launch.py">
+        <arg name="robot_ip" value="192.168.1.100" />
+        <arg name="kinematics_config" value="$(find irp_ur5e_support)/config/ur5e_calibration.yaml" />
+    </include> 
+
+    <!-- load controller settings -->
+    <include file="$(find irp_ur5e_support)/launch/my_controllers.launch.py" />
+    
+   <!-- start action nodes -->
+    <node pkg="irp_ur5e_support" exec="ap_movepose.py" name="ap_movepose" output="screen"/>
+    <node pkg="irp_ur5e_support" exec="ap_moveJointsPos.py" name="ap_moveJointsPos" output="screen"/>
+    <node pkg="irp_ur5e_support" exec="ap_moveTwist.py" name="ap_moveTwist" output="screen"/>
+    <node pkg="irp_ur5e_support" exec="admittanz_regler.py" name="admittanz_regler" output="screen"/>
+
+    <!-- robot TCP pose publisher -->
+    <node pkg="irp_ur5e_support" exec="robot_pose_publisher.py" name="robot_pose" output="screen"/>
+
+    <!-- load realsense camera -->
+    <include file="$(find realsense2_camera)/launch/rs_camera.launch.py">
+        <arg name="color_width" value="1280" /> 
+        <arg name="color_height" value="720" />
+        <arg name="color_fps" value="15" />
+        <arg name="enable_depth" value="false" />
+        <arg name="enable_confidence" value="false"/>
+    </include>
+
+    <!-- start egh_80_iol_n gripper service -->
+    <node pkg="egh_80_iol_n" exec="egh_80_iol_n_service.py" name="egh_80_iol_n" output="screen">
+        <arg value="192.168.1.110" />
+    </node>
+
+    <!-- start ftn_axia_80 sensor node -->
+    <node pkg="ftn_axia80" exec="ftn-axia-publisher.py" name="ftn_axia" output="screen">
+        <arg value="192.168.1.120" />
+    </node>
+</launch>
+
