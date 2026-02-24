@@ -1,0 +1,30 @@
+# ROS2 / colcon artifacts
+/ros_ws/build/
+/ros_ws/install/
+/ros_ws/log/
+*.log
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.venv/
+/ros_ws/.venv/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Keep workspace source tree trackable
+!ros_ws/src/
+!ros_ws/src/**
