@@ -28,3 +28,15 @@ Thumbs.db
 # Keep workspace source tree trackable
 !ros_ws/src/
 !ros_ws/src/**
+
+# Re-ignore generated artifacts inside ros_ws/src packages
+ros_ws/src/**/build/
+ros_ws/src/**/install/
+ros_ws/src/**/log/
+ros_ws/src/**/__pycache__/
+ros_ws/src/**/*.pyc
+ros_ws/src/**/*.pyo
+ros_ws/src/**/*.pyd
+ros_ws/src/**/.pytest_cache/
+ros_ws/src/**/.mypy_cache/
+ros_ws/src/**/.ruff_cache/
