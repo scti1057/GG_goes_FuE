@@ -4,11 +4,13 @@
   <name>ibvs_perception</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
-  <maintainer email="duckie.town@web.de">duckie5</maintainer>
+  <maintainer email="scti1057@h-ka.de">duckie5</maintainer>
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>ibvs_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

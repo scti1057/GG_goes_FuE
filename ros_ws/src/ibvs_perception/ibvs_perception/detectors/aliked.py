@@ -22,7 +22,7 @@ class ALIKEDDetector:
         t = torch.from_numpy(img3).to(self.device)
 
         with torch.no_grad():
-            feats = self.model.extract(t)
+            feats = self.model.extract(t, resize=None)
 
         k = feats["keypoints"][0].detach().cpu().numpy().astype(np.float32)
         d = feats["descriptors"][0].detach().cpu().numpy().astype(np.float32)

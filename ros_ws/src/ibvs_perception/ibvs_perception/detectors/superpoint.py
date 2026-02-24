@@ -23,7 +23,7 @@ class SuperPointDetector:
         t = torch.from_numpy(img3).to(self.device)
 
         with torch.no_grad():
-            feats = self.model.extract(t)  # dict with batch dim
+            feats = self.model.extract(t, resize=None)  # dict with batch dim; disable LightGlue auto-resize
 
         k = feats["keypoints"][0].detach().cpu().numpy().astype(np.float32)       # (N,2)
         d = feats["descriptors"][0].detach().cpu().numpy().astype(np.float32)     # (N,D)

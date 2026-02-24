@@ -13,7 +13,8 @@ ros2 launch realsense2_camera rs_launch.py \
   enable_depth:=true \
   depth_module.depth_profile:=640x480x15 \
   depth_module.depth_format:=Z16 \
-  enable_color:=false \
+  enable_color:=true \
+  rgb_camera.color_profile:=640x480x30 \
   depth_module.emitter_enabled:=1 \
   depth_module.enable_auto_exposure:=true \
   spatial_filter.enable:=true \

@@ -24,6 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'keypoint_debug = ibvs_perception.keypoint_debug_node:main',
+
         ],
     },
 )
