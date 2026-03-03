@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'ibvs_perception'
+package_name = 'ibvs_reference'
 
 setup(
     name=package_name,
@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'keypoint = ibvs_perception.keypoint_node:main',
+            'reference_manager = ibvs_reference.reference_manager_node:main',
 
         ],
     },
