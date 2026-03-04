@@ -1,0 +1,26 @@
+services:
+  ros_ws:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ROS_DISTRO: humble
+        USER_UID: ${HOST_UID:-1000}
+        USER_GID: ${HOST_GID:-1000}
+    image: ros_ws:local
+    container_name: ros_ws
+    network_mode: host
+    environment:
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - QT_X11_NO_MITSHM=1
+      - XAUTHORITY=${XAUTHORITY}
+      - IBVS_XFEAT_REPO_DIR=/home/ros_ws/third_party/accelerated_features
+    volumes:
+      - ./:/home/ros_ws
+      - ${XAUTHORITY}:${XAUTHORITY}:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    working_dir: /home/ros_ws
+    tty: true
+    stdin_open: true
+    command: bash

@@ -8,6 +8,8 @@ source /home/ros/ros2_ws/install/setup.bash
 
 # Start the realsense hardware driver
 echo "Starting the realsense ros driver..."
+
+# Read params from file
 ros2 launch realsense2_camera rs_launch.py \
   align_depth.enable:=true \
   enable_depth:=true \

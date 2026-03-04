@@ -1,8 +1,14 @@
 import numpy as np
 import torch
 import sys
+import os
 from pathlib import Path
 from .base import DetectionResult
+
+# accelerated_features expects torch.inference_mode (newer torch versions).
+# Provide a no_grad fallback for environments shipping torch<1.9.
+if not hasattr(torch, "inference_mode"):
+    torch.inference_mode = torch.no_grad  # type: ignore[attr-defined]
 
 class XFeatDetector:
     name = "xfeat"
@@ -11,10 +17,16 @@ class XFeatDetector:
         self,
         top_k: int = 1024,
         device: str = "cpu",
-        repo_dir: str = "/home/duckie5/Documents/GG_goes_FundE/ros_ws/third_party/accelerated_features",
+        repo_dir: str | None = None,
     ):
         self.top_k = top_k
         self.device = device
+
+        if repo_dir is None:
+            repo_dir = os.environ.get(
+                "IBVS_XFEAT_REPO_DIR",
+                "/home/ros_ws/third_party/accelerated_features",
+            )
 
         repo_path = Path(repo_dir)
         if not repo_path.exists():

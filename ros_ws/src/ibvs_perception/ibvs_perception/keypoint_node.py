@@ -35,6 +35,7 @@ class KeypointNode(Node):
         self.declare_parameter('device', 'cpu')           # cpu (später cuda möglich)
         self.declare_parameter('max_num_keypoints', 1024) # for superpoint/aliked
         self.declare_parameter('top_k', 1024)             # for xfeat
+        self.declare_parameter('xfeat_repo_dir', '')      # optional absolute path to accelerated_features repo
         self.declare_parameter('nfeatures', 800)          # for sift/orb
 
         # Depth ROI params
@@ -56,6 +57,7 @@ class KeypointNode(Node):
         device = self.get_parameter('device').value
         max_kp = int(self.get_parameter('max_num_keypoints').value)
         top_k = int(self.get_parameter('top_k').value)
+        xfeat_repo_dir = str(self.get_parameter('xfeat_repo_dir').value).strip()
         nfeatures = int(self.get_parameter('nfeatures').value)
 
         kwargs = {}
@@ -63,6 +65,8 @@ class KeypointNode(Node):
             kwargs = {'max_num_keypoints': max_kp, 'device': device}
         elif self.detector_type == 'xfeat':
             kwargs = {'top_k': top_k, 'device': device}
+            if xfeat_repo_dir:
+                kwargs['repo_dir'] = xfeat_repo_dir
         elif self.detector_type in ('sift', 'orb'):
             kwargs = {'nfeatures': nfeatures}
 

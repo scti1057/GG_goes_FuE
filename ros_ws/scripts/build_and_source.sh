@@ -1,4 +1,4 @@
-# Usage: source /home/duckie5/Documents/GG_goes_FundE/ros_ws/scripts/build_and_source.sh
+# Usage: source scripts/build_and_source.sh
 
 # Ensure we are sourced (works in bash + zsh)
 if ! (return 0 2>/dev/null); then
@@ -6,7 +6,7 @@ if ! (return 0 2>/dev/null); then
   exit 1
 fi
 
-WS_DIR="/home/duckie5/Documents/GG_goes_FundE/ros_ws"
+WS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Basic sanity checks
 if [ ! -d "$WS_DIR" ]; then
@@ -17,18 +17,22 @@ if [ ! -f "/opt/ros/humble/setup.bash" ]; then
   echo "ROS2 Humble not found at /opt/ros/humble"
   return 1
 fi
-if [ ! -f "$WS_DIR/.venv/bin/activate" ]; then
-  echo "venv not found: $WS_DIR/.venv"
-  return 1
+HAS_VENV=0
+if [ -f "$WS_DIR/.venv/bin/activate" ]; then
+  HAS_VENV=1
+else
+  echo "Info: venv not found at $WS_DIR/.venv (continuing without venv)"
 fi
 
 # Clean noisy vars (optional)
 unset AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH PYTHONPATH 2>/dev/null
 unset CATKIN_INSTALL_INTO_PREFIX_ROOT CATKIN_SYMLINK_INSTALL 2>/dev/null
 
-# Source underlay + venv
+# Source underlay + optional venv
 source /opt/ros/humble/setup.bash || return 1
-source "$WS_DIR/.venv/bin/activate" || return 1
+if [ "$HAS_VENV" -eq 1 ]; then
+  source "$WS_DIR/.venv/bin/activate" || return 1
+fi
 
 cd "$WS_DIR" || return 1
 
