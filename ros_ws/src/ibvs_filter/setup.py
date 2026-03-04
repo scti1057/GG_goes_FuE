@@ -13,8 +13,8 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='duckie6',
-    maintainer_email='12345678+dpulidogeology@users.noreply.github.com',
+    maintainer='Paul Glaser',
+    maintainer_email='paul.glaser0401@gmail.com',
     description='TODO: Package description',
     license='Apache-2.0',
     extras_require={
@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'my_node = ibvs_filter.my_node:main'
+            'filter_node = ibvs_filter.filter_node:main'
         ],
     },
 )
