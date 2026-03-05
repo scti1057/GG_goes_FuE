@@ -126,6 +126,15 @@
      <origin xyz="0 0 0" rpy="0 0 0" />          <!-- position robot in the world -->
    </xacro:ur_robot>
 
+   <!-- new Link for camera -->
+   <link name="$(arg tf_prefix)camera_link"/>
+    <joint name="$(arg tf_prefix)wrist_3_to_camera_joint" type="fixed">
+      <parent link="$(arg tf_prefix)wrist_3_link" />
+      <child link="$(arg tf_prefix)camera_link" />
+      <origin xyz="0.0 -0.112 0.044" rpy="0.0 0.0 -1.5708" />
+    </joint>
+
+
    <xacro:if value="$(arg sim_gazebo)">
     <!-- Gazebo plugins -->
     <gazebo reference="world">

@@ -199,5 +199,12 @@
         <parent link="egh80_gripper" />
         <child link="tool_egh80" />
     </joint>
+    
+    <link name="camera_link"/>
+    <joint name="wrist_3_to_camera_joint" type="fixed">
+      <parent link="wrist_3_link" />
+      <child link="camera_link" />
+      <origin xyz="0.0 -0.112 0.044" rpy="0.0 0.0 -1.5708" />
+    </joint>
 
 </robot>

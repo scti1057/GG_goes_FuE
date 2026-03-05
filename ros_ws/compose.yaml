@@ -10,12 +10,15 @@ services:
     image: ros_ws:local
     container_name: ros_ws
     network_mode: host
+    gpus: all
     environment:
       - DISPLAY=${DISPLAY}
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
       - QT_X11_NO_MITSHM=1
       - XAUTHORITY=${XAUTHORITY}
       - IBVS_XFEAT_REPO_DIR=/home/ros_ws/third_party/accelerated_features
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
       - ./:/home/ros_ws
       - ${XAUTHORITY}:${XAUTHORITY}:rw

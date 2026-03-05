@@ -48,9 +48,12 @@ class ReferenceManagerNode(Node):
         self.declare_parameter('desc_match_threshold', 0.85)  # cosine
         self.declare_parameter('max_px_dist', 4.0)            # pixel gate (robot still)
         self.declare_parameter('desc_ema_alpha', 0.25)
+        self.declare_parameter('reference_republish_hz', 2.0)
 
         self.declare_parameter('save_overlay_path', '/tmp/ibvs_reference_overlay.png')
         self.declare_parameter('save_npz_path', '')           # optional: /tmp/reference.npz
+        self.declare_parameter('debug_mode', False)
+        self.declare_parameter('debug_topic', '/ibvs/debug/reference_candidates_image')
 
         # State
         self.bridge = CvBridge()
@@ -68,6 +71,7 @@ class ReferenceManagerNode(Node):
         self.ref_xy: Optional[np.ndarray] = None    # (K,2)
         self.ref_desc: Optional[np.ndarray] = None  # (K,D) or None
         self.ref_counts: Optional[np.ndarray] = None
+        self.last_ref_pub_t: float = 0.0
 
         # QoS: latched-like publisher for ref + init_done
         latched_qos = QoSProfile(
@@ -79,6 +83,9 @@ class ReferenceManagerNode(Node):
 
         self.init_done_pub = self.create_publisher(Bool, '/ibvs/init_done', latched_qos)
         self.ref_pub = self.create_publisher(Keypoints, '/ibvs/reference/keypoints', latched_qos)
+        self.debug_pub = None
+        if bool(self.get_parameter('debug_mode').value):
+            self.debug_pub = self.create_publisher(Image, self.get_parameter('debug_topic').value, 10)
 
         # Subscribers
         kp_topic = self.get_parameter('keypoints_topic').value
@@ -94,6 +101,8 @@ class ReferenceManagerNode(Node):
 
         self.publish_init_done(False)
         self.get_logger().info(f"Ready. keypoints_topic={kp_topic} image_topic={img_topic}")
+        if self.debug_pub is not None:
+            self.get_logger().info(f"Debug overlay topic={self.get_parameter('debug_topic').value}")
 
     def publish_init_done(self, v: bool):
         msg = Bool()
@@ -120,6 +129,7 @@ class ReferenceManagerNode(Node):
         self.ref_xy = None
         self.ref_desc = None
         self.ref_counts = None
+        self.last_ref_pub_t = 0.0
 
         self.capturing = True
         self.capture_t0 = time.time()
@@ -134,10 +144,47 @@ class ReferenceManagerNode(Node):
 
     def on_timer(self):
         if not self.capturing:
+            self.publish_reference()
             return
+
         dur = float(self.get_parameter('init_duration_sec').value)
         if (time.time() - self.capture_t0) >= dur:
             self.finish_capture()
+
+    def publish_reference(self, force: bool = False):
+        if not self.reference_ready or self.ref_xy is None:
+            return
+
+        hz = float(self.get_parameter('reference_republish_hz').value)
+        now = time.time()
+        if not force:
+            if hz <= 0.0:
+                return
+            period = 1.0 / hz
+            if (now - self.last_ref_pub_t) < period:
+                return
+
+        if self.latest_img_header is not None:
+            header = self.latest_img_header
+        else:
+            header = Header()
+            header.stamp = self.get_clock().now().to_msg()
+            header.frame_id = ""
+
+        D = int(self.ref_desc.shape[1]) if self.ref_desc is not None else 0
+
+        ref_msg = Keypoints()
+        ref_msg.header = header
+        ref_msg.xy = self.ref_xy.reshape(-1).tolist()
+        ref_msg.descriptor_dim = D
+        if self.ref_desc is None:
+            ref_msg.descriptors = []
+        else:
+            ref_msg.descriptors = self.ref_desc.reshape(-1).tolist()
+        ref_msg.scores = []
+
+        self.ref_pub.publish(ref_msg)
+        self.last_ref_pub_t = now
 
     def on_keypoints(self, msg: Keypoints):
         if not self.capturing:
@@ -232,6 +279,36 @@ class ReferenceManagerNode(Node):
                     score_sum=s_i,
                 )
 
+        self.publish_debug_overlay(msg.header)
+
+    def publish_debug_overlay(self, header: Header):
+        if self.debug_pub is None or self.latest_bgr is None:
+            return
+
+        dbg = self.latest_bgr.copy()
+        for c in self.candidates.values():
+            x, y = int(c.xy[0]), int(c.xy[1])
+            cv2.circle(dbg, (x, y), 2, (0, 255, 255), -1)
+
+        if self.ref_xy is not None:
+            for x, y in self.ref_xy:
+                cv2.circle(dbg, (int(x), int(y)), 3, (0, 0, 255), -1)
+
+        cv2.putText(
+            dbg,
+            f"capturing={self.capturing} candidates={len(self.candidates)}",
+            (10, 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        msg = self.bridge.cv2_to_imgmsg(dbg, encoding='bgr8')
+        msg.header = header
+        self.debug_pub.publish(msg)
+
     def finish_capture(self):
         self.capturing = False
 
@@ -250,30 +327,13 @@ class ReferenceManagerNode(Node):
 
         if keep[0].desc is not None:
             self.ref_desc = np.stack([c.desc for c in keep], axis=0).astype(np.float32)  # type: ignore
-            D = self.ref_desc.shape[1]
         else:
             self.ref_desc = None
-            D = 0
 
-        # Publish reference as latched Keypoints msg
-        ref_msg = Keypoints()
-        if self.latest_img_header is not None:
-            ref_msg.header = self.latest_img_header
-        else:
-            ref_msg.header = Header()
-            ref_msg.header.stamp = self.get_clock().now().to_msg()
-            ref_msg.header.frame_id = ""
+        self.reference_ready = True
 
-        ref_msg.xy = self.ref_xy.reshape(-1).tolist()
-        ref_msg.descriptor_dim = int(D)
-        if self.ref_desc is None:
-            ref_msg.descriptors = []
-        else:
-            ref_msg.descriptors = self.ref_desc.reshape(-1).tolist()
-
-        # keep scores empty here (counts not a "score" semantically)
-        ref_msg.scores = []
-        self.ref_pub.publish(ref_msg)
+        # Publish once immediately, then keep republishing from timer.
+        self.publish_reference(force=True)
 
         # Save overlay
         save_path = str(self.get_parameter('save_overlay_path').value)
@@ -283,6 +343,11 @@ class ReferenceManagerNode(Node):
                 cv2.circle(img, (int(x), int(y)), 3, (0, 0, 255), -1)
             cv2.imwrite(save_path, img)
             self.get_logger().info(f"Saved reference overlay: {save_path}")
+            if self.debug_pub is not None:
+                dbg_msg = self.bridge.cv2_to_imgmsg(img, encoding='bgr8')
+                if self.latest_img_header is not None:
+                    dbg_msg.header = self.latest_img_header
+                self.debug_pub.publish(dbg_msg)
 
         # Optional npz
         npz_path = str(self.get_parameter('save_npz_path').value)
@@ -295,7 +360,6 @@ class ReferenceManagerNode(Node):
             )
             self.get_logger().info(f"Saved reference npz: {npz_path}")
 
-        self.reference_ready = True
         self.publish_init_done(True)
         self.get_logger().info(f"Capture done. candidates={len(self.candidates)} kept={K} best_count={keep[0].count}")
 
