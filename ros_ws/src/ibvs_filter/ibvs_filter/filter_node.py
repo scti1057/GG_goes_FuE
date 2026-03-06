@@ -11,6 +11,8 @@ import threading
 
 import tf2_ros
 import message_filters
+from rcl_interfaces.msg import SetParametersResult
+from std_msgs.msg import Float32MultiArray
 from sensor_msgs.msg import CameraInfo, Image
 from ibvs_msgs.msg import Matches, Keypoints
 from cv_bridge import CvBridge
@@ -40,6 +42,9 @@ class FilterNode(Node):
         self.declare_parameter('debug', True)
 
         self.filter_type = self.get_parameter('filter_type').value
+        self.q_noise = self.get_parameter('q_noise').value
+        self.r_noise = self.get_parameter('r_noise').value
+        self.gate_threshold = self.get_parameter('gate_threshold').value
         self.z_depth = self.get_parameter('z_depth').value
         self.base_frame = self.get_parameter('base_frame').value
         self.camera_frame = self.get_parameter('camera_frame').value
@@ -92,6 +97,8 @@ class FilterNode(Node):
         # 3. Predict Schritt (Zeit-basiert, fester Takt)
         self.timer = self.create_timer(1.0 / self.predict_rate, self.timer_callback, callback_group=self.cb_group)
 
+        self.add_on_set_parameters_callback(self._on_parameters_changed)
+
         self.get_logger().info(f"Filter Node gestartet. Modus: {self.filter_type}. Warte auf K-Matrix und Referenz...")
 
     def cam_info_callback(self, msg: CameraInfo):
@@ -110,11 +117,55 @@ class FilterNode(Node):
             return
             
         self.filter.set_Q_R_gate(
-            self.get_parameter('q_noise').value, 
-            self.get_parameter('r_noise').value, 
-            self.get_parameter('gate_threshold').value
+            self.q_noise,
+            self.r_noise,
+            self.gate_threshold
         )
         self.get_logger().info(f"Filter initialized, status: {self.filter.status}")
+
+    def _on_parameters_changed(self, params):
+        next_q = self.q_noise
+        next_r = self.r_noise
+        next_gate = self.gate_threshold
+        next_z = self.z_depth
+
+        for p in params:
+            if p.name == 'filter_type':
+                return SetParametersResult(
+                    successful=False,
+                    reason='filter_type cannot be changed at runtime. Restart node.'
+                )
+            if p.name == 'q_noise':
+                if p.value <= 0.0:
+                    return SetParametersResult(successful=False, reason='q_noise must be > 0')
+                next_q = float(p.value)
+            elif p.name == 'r_noise':
+                if p.value <= 0.0:
+                    return SetParametersResult(successful=False, reason='r_noise must be > 0')
+                next_r = float(p.value)
+            elif p.name == 'gate_threshold':
+                if p.value <= 0.0:
+                    return SetParametersResult(successful=False, reason='gate_threshold must be > 0')
+                next_gate = float(p.value)
+            elif p.name == 'z_depth':
+                if p.value <= 0.0:
+                    return SetParametersResult(successful=False, reason='z_depth must be > 0')
+                next_z = float(p.value)
+
+        self.q_noise = next_q
+        self.r_noise = next_r
+        self.gate_threshold = next_gate
+        self.z_depth = next_z
+
+        if self.filter is not None:
+            self.filter.set_Q_R_gate(self.q_noise, self.r_noise, self.gate_threshold)
+            self.get_logger().info(
+                f"Tuning updated: q_noise={self.q_noise:.4f}, "
+                f"r_noise={self.r_noise:.4f}, gate_threshold={self.gate_threshold:.4f}, "
+                f"z_depth={self.z_depth:.4f}"
+            )
+
+        return SetParametersResult(successful=True)
 
     def reference_callback(self, msg: Keypoints):
         if self.reference_keypoints_raw is None:
