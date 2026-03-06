@@ -8,6 +8,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 import cv2
 import threading
+from collections import deque
 
 import tf2_ros
 import message_filters
@@ -39,6 +40,11 @@ class FilterNode(Node):
         self.declare_parameter('camera_frame', 'camera_color_frame') # camera_color_optical_frame
         self.declare_parameter('tcp_frame', 'tool0_controller')
         self.declare_parameter('tcp_pose_topic', '/tcp_pose_broadcaster/pose')
+        self.declare_parameter('tcp_velocity_window_sec', 0.05)
+        self.declare_parameter('tcp_velocity_lowpass_alpha', 0.25)
+        self.declare_parameter('tcp_velocity_deadband_linear', 0.002)
+        self.declare_parameter('tcp_velocity_deadband_angular', 0.01)
+        self.declare_parameter('tcp_velocity_stale_timeout', 0.2)
         self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
         
         # Debug Flag
@@ -53,6 +59,11 @@ class FilterNode(Node):
         self.camera_frame = self.get_parameter('camera_frame').value
         self.tcp_frame = self.get_parameter('tcp_frame').value
         self.tcp_pose_topic = self.get_parameter('tcp_pose_topic').value
+        self.tcp_velocity_window_sec = float(self.get_parameter('tcp_velocity_window_sec').value)
+        self.tcp_velocity_lowpass_alpha = float(self.get_parameter('tcp_velocity_lowpass_alpha').value)
+        self.tcp_velocity_deadband_linear = float(self.get_parameter('tcp_velocity_deadband_linear').value)
+        self.tcp_velocity_deadband_angular = float(self.get_parameter('tcp_velocity_deadband_angular').value)
+        self.tcp_velocity_stale_timeout = float(self.get_parameter('tcp_velocity_stale_timeout').value)
         self.debug_mode = self.get_parameter('debug').value
         self.predict_rate = self.get_parameter('predict_rate').value
         
@@ -73,10 +84,11 @@ class FilterNode(Node):
         self.last_tcp_pose_stamp = None
         self.last_tcp_position = None
         self.last_tcp_rotation = None
-        self.latest_v_cam = None
-        self.latest_v_dt = 0.0
+        self.tcp_pose_history = deque()
+        self.latest_v_tcp_base = None
         self.latest_v_stamp = None
-        self.last_consumed_v_stamp = None
+        self.latest_tcp_rot_for_velocity = None
+        self.last_predict_time = None
 
         # CV Bridge für das Debug Bild
         self.cv_bridge = CvBridge()
@@ -146,6 +158,11 @@ class FilterNode(Node):
         next_r = self.r_noise
         next_gate = self.gate_threshold
         next_z = self.z_depth
+        next_vel_window = self.tcp_velocity_window_sec
+        next_vel_alpha = self.tcp_velocity_lowpass_alpha
+        next_deadband_lin = self.tcp_velocity_deadband_linear
+        next_deadband_ang = self.tcp_velocity_deadband_angular
+        next_stale_timeout = self.tcp_velocity_stale_timeout
 
         for p in params:
             if p.name == 'filter_type':
@@ -169,11 +186,48 @@ class FilterNode(Node):
                 if p.value <= 0.0:
                     return SetParametersResult(successful=False, reason='z_depth must be > 0')
                 next_z = float(p.value)
+            elif p.name == 'tcp_velocity_window_sec':
+                if p.value <= 0.0:
+                    return SetParametersResult(successful=False, reason='tcp_velocity_window_sec must be > 0')
+                next_vel_window = float(p.value)
+            elif p.name == 'tcp_velocity_lowpass_alpha':
+                if p.value < 0.0 or p.value > 1.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='tcp_velocity_lowpass_alpha must be in [0, 1]',
+                    )
+                next_vel_alpha = float(p.value)
+            elif p.name == 'tcp_velocity_deadband_linear':
+                if p.value < 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='tcp_velocity_deadband_linear must be >= 0',
+                    )
+                next_deadband_lin = float(p.value)
+            elif p.name == 'tcp_velocity_deadband_angular':
+                if p.value < 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='tcp_velocity_deadband_angular must be >= 0',
+                    )
+                next_deadband_ang = float(p.value)
+            elif p.name == 'tcp_velocity_stale_timeout':
+                if p.value <= 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='tcp_velocity_stale_timeout must be > 0',
+                    )
+                next_stale_timeout = float(p.value)
 
         self.q_noise = next_q
         self.r_noise = next_r
         self.gate_threshold = next_gate
         self.z_depth = next_z
+        self.tcp_velocity_window_sec = next_vel_window
+        self.tcp_velocity_lowpass_alpha = next_vel_alpha
+        self.tcp_velocity_deadband_linear = next_deadband_lin
+        self.tcp_velocity_deadband_angular = next_deadband_ang
+        self.tcp_velocity_stale_timeout = next_stale_timeout
 
         if self.filter is not None:
             self.filter.set_Q_R_gate(self.q_noise, self.r_noise, self.gate_threshold)
@@ -211,35 +265,41 @@ class FilterNode(Node):
         )
 
         with self.pose_lock:
-            prev_pos = self.last_tcp_position
-            prev_rot = self.last_tcp_rotation
-            prev_stamp = self.last_tcp_pose_stamp
+            self.tcp_pose_history.append((current_time, pos, rot))
+            cutoff = current_time - max(0.5, 3.0 * self.tcp_velocity_window_sec)
+            while len(self.tcp_pose_history) > 2 and self.tcp_pose_history[0][0] < cutoff:
+                self.tcp_pose_history.popleft()
+
+            oldest_time, oldest_pos, oldest_rot = self.tcp_pose_history[0]
+            dt = current_time - oldest_time
             self.last_tcp_position = pos
             self.last_tcp_rotation = rot
             self.last_tcp_pose_stamp = current_time
 
-        if prev_pos is None or prev_rot is None or prev_stamp is None:
+        if dt < self.tcp_velocity_window_sec or dt <= 0.001:
             return
 
-        dt = current_time - prev_stamp
-        if dt <= 0.001:
-            return
-
-        dp_base = pos - prev_pos
+        dp_base = pos - oldest_pos
         v_tcp_base = dp_base / dt
 
         # Delta-Rotation in Basis-Koordinaten für omega_base
-        r_delta_base = rot * prev_rot.inv()
+        r_delta_base = rot * oldest_rot.inv()
         w_base = r_delta_base.as_rotvec() / dt
-
-        v_cam = self._transform_tcp_twist_to_camera(v_tcp_base, w_base, rot)
-        if v_cam is None:
-            return
+        raw_twist = np.hstack((v_tcp_base, w_base))
 
         with self.pose_lock:
-            self.latest_v_cam = v_cam
-            self.latest_v_dt = dt
+            if self.latest_v_tcp_base is None:
+                filtered = raw_twist
+            else:
+                alpha = self.tcp_velocity_lowpass_alpha
+                filtered = alpha * raw_twist + (1.0 - alpha) * self.latest_v_tcp_base
+
+            filtered[:3][np.abs(filtered[:3]) < self.tcp_velocity_deadband_linear] = 0.0
+            filtered[3:][np.abs(filtered[3:]) < self.tcp_velocity_deadband_angular] = 0.0
+
+            self.latest_v_tcp_base = filtered
             self.latest_v_stamp = current_time
+            self.latest_tcp_rot_for_velocity = rot
 
     def _transform_tcp_twist_to_camera(self, v_tcp_base, w_base, tcp_rot):
         try:
@@ -293,16 +353,32 @@ class FilterNode(Node):
 
     def get_camera_velocity_from_tcp_pose(self):
         with self.pose_lock:
-            if self.latest_v_cam is None:
-                return None, 0.0
+            if self.latest_v_tcp_base is None or self.latest_v_stamp is None:
+                return np.zeros(6)
+            v_tcp_base = self.latest_v_tcp_base.copy()
+            latest_stamp = self.latest_v_stamp
+            tcp_rot = self.latest_tcp_rot_for_velocity
 
-            if self.latest_v_stamp != self.last_consumed_v_stamp:
-                self.last_consumed_v_stamp = self.latest_v_stamp
-                dt = max(self.latest_v_dt, 1.0 / float(self.predict_rate))
-                return self.latest_v_cam.copy(), dt
+        now_sec = self.get_clock().now().nanoseconds * 1e-9
+        if (now_sec - latest_stamp) > self.tcp_velocity_stale_timeout:
+            return np.zeros(6)
 
-        # Kein neues Pose-Sample seit letztem Predict: stationaere Annahme
-        return np.zeros(6), 1.0 / float(self.predict_rate)
+        v_cam = self._transform_tcp_twist_to_camera(v_tcp_base[:3], v_tcp_base[3:], tcp_rot)
+        if v_cam is None:
+            return np.zeros(6)
+        return v_cam
+
+    def get_predict_dt(self):
+        now_sec = self.get_clock().now().nanoseconds * 1e-9
+        if self.last_predict_time is None:
+            self.last_predict_time = now_sec
+            return 1.0 / float(self.predict_rate)
+
+        dt = now_sec - self.last_predict_time
+        self.last_predict_time = now_sec
+        if dt <= 0.0 or dt > 1.0:
+            return 1.0 / float(self.predict_rate)
+        return dt
 
     def timer_callback(self):
         """1. Predict Schritt: Wird mit fester Frequenz ausgeführt."""
@@ -311,11 +387,9 @@ class FilterNode(Node):
         if self.reference_keypoints_raw is None:
             return
 
-        # Kinematik aus zwei TCP-Posen berechnen und ins Kamera-Frame transformieren
-        v_ee, dt = self.get_camera_velocity_from_tcp_pose()
-        
-        if v_ee is None:
-            return
+        dt = self.get_predict_dt()
+        # Kinematik aus TCP-Posen berechnen und ins Kamera-Frame transformieren
+        v_ee = self.get_camera_velocity_from_tcp_pose()
 
         # Predict ausführen
         with self.lock:
