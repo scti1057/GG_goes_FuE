@@ -14,6 +14,7 @@ import message_filters
 from rcl_interfaces.msg import SetParametersResult
 from std_msgs.msg import Float32MultiArray
 from sensor_msgs.msg import CameraInfo, Image
+from geometry_msgs.msg import PoseStamped
 from ibvs_msgs.msg import Matches, Keypoints
 from cv_bridge import CvBridge
 
@@ -35,7 +36,9 @@ class FilterNode(Node):
         self.declare_parameter('predict_rate', 60.0) # Hz (Reduziert für Performance, 60Hz reicht völlig)
         
         self.declare_parameter('base_frame', 'base_link') 
-        self.declare_parameter('camera_frame', 'camera_color_optical_frame') # camera_color_optical_frame
+        self.declare_parameter('camera_frame', 'camera_color_frame') # camera_color_optical_frame
+        self.declare_parameter('tcp_frame', 'tool0_controller')
+        self.declare_parameter('tcp_pose_topic', '/tcp_pose_broadcaster/pose')
         self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
         
         # Debug Flag
@@ -48,6 +51,8 @@ class FilterNode(Node):
         self.z_depth = self.get_parameter('z_depth').value
         self.base_frame = self.get_parameter('base_frame').value
         self.camera_frame = self.get_parameter('camera_frame').value
+        self.tcp_frame = self.get_parameter('tcp_frame').value
+        self.tcp_pose_topic = self.get_parameter('tcp_pose_topic').value
         self.debug_mode = self.get_parameter('debug').value
         self.predict_rate = self.get_parameter('predict_rate').value
         
@@ -63,9 +68,15 @@ class FilterNode(Node):
         self.last_current_pixels = None
         self.last_desired_pixels = None
         
-        self.last_tf_stamp = None
-        self.last_position = None
-        self.last_rotation = None
+        # TCP-Pose History zur Geschwindigkeitsberechnung (Delta Pose / Delta Zeit)
+        self.pose_lock = threading.Lock()
+        self.last_tcp_pose_stamp = None
+        self.last_tcp_position = None
+        self.last_tcp_rotation = None
+        self.latest_v_cam = None
+        self.latest_v_dt = 0.0
+        self.latest_v_stamp = None
+        self.last_consumed_v_stamp = None
 
         # CV Bridge für das Debug Bild
         self.cv_bridge = CvBridge()
@@ -81,6 +92,13 @@ class FilterNode(Node):
         # --- Subscriber (Asynchron) ---
         self.sub_cam_info = self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self.cam_info_callback, 10, callback_group=self.cb_group)
         self.sub_ref = self.create_subscription(Keypoints, '/ibvs/reference/keypoints', self.reference_callback, 10, callback_group=self.cb_group)
+        self.sub_tcp_pose = self.create_subscription(
+            PoseStamped,
+            self.tcp_pose_topic,
+            self.tcp_pose_callback,
+            10,
+            callback_group=self.cb_group,
+        )
         
         # --- Publisher ---
         self.pub_filtered_points = self.create_publisher(Matches, '/ibvs/filtered_features', 10)
@@ -174,36 +192,117 @@ class FilterNode(Node):
             if self.filter is not None:
                 self.filter.force_relocalization()
 
-    def get_camera_velocity_from_tf(self, time_stamp):
-        try:
-            t = self.tf_buffer.lookup_transform(self.base_frame, self.camera_frame, time_stamp, rclpy.duration.Duration(seconds=0.1))
-        except Exception as e:
-            self.get_logger().warn(f"TF Fehler: {e}", throttle_duration_sec=2.0)
-            return None, 0.0
+    def tcp_pose_callback(self, msg: PoseStamped):
+        current_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if current_time <= 0.0:
+            current_time = self.get_clock().now().nanoseconds * 1e-9
 
-        current_time = t.header.stamp.sec + t.header.stamp.nanosec * 1e-9
-        pos = np.array([t.transform.translation.x, t.transform.translation.y, t.transform.translation.z])
-        rot = R.from_quat([t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w])
+        pos = np.array(
+            [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z],
+            dtype=np.float64,
+        )
+        rot = R.from_quat(
+            [
+                msg.pose.orientation.x,
+                msg.pose.orientation.y,
+                msg.pose.orientation.z,
+                msg.pose.orientation.w,
+            ]
+        )
+
+        with self.pose_lock:
+            prev_pos = self.last_tcp_position
+            prev_rot = self.last_tcp_rotation
+            prev_stamp = self.last_tcp_pose_stamp
+            self.last_tcp_position = pos
+            self.last_tcp_rotation = rot
+            self.last_tcp_pose_stamp = current_time
+
+        if prev_pos is None or prev_rot is None or prev_stamp is None:
+            return
+
+        dt = current_time - prev_stamp
+        if dt <= 0.001:
+            return
+
+        dp_base = pos - prev_pos
+        v_tcp_base = dp_base / dt
+
+        # Delta-Rotation in Basis-Koordinaten für omega_base
+        r_delta_base = rot * prev_rot.inv()
+        w_base = r_delta_base.as_rotvec() / dt
+
+        v_cam = self._transform_tcp_twist_to_camera(v_tcp_base, w_base, rot)
+        if v_cam is None:
+            return
+
+        with self.pose_lock:
+            self.latest_v_cam = v_cam
+            self.latest_v_dt = dt
+            self.latest_v_stamp = current_time
+
+    def _transform_tcp_twist_to_camera(self, v_tcp_base, w_base, tcp_rot):
+        try:
+            tf_base_cam = self.tf_buffer.lookup_transform(
+                self.base_frame,
+                self.camera_frame,
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=0.1),
+            )
+        except Exception as e:
+            self.get_logger().warn(f"TF Fehler base->camera: {e}", throttle_duration_sec=2.0)
+            return None
+
+        cam_rot = R.from_quat(
+            [
+                tf_base_cam.transform.rotation.x,
+                tf_base_cam.transform.rotation.y,
+                tf_base_cam.transform.rotation.z,
+                tf_base_cam.transform.rotation.w,
+            ]
+        )
+
+        v_cam_origin_base = np.array(v_tcp_base, dtype=np.float64)
+        try:
+            tf_tcp_cam = self.tf_buffer.lookup_transform(
+                self.tcp_frame,
+                self.camera_frame,
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=0.05),
+            )
+            p_tcp_cam_tcp = np.array(
+                [
+                    tf_tcp_cam.transform.translation.x,
+                    tf_tcp_cam.transform.translation.y,
+                    tf_tcp_cam.transform.translation.z,
+                ],
+                dtype=np.float64,
+            )
+            p_tcp_cam_base = tcp_rot.apply(p_tcp_cam_tcp)
+            v_cam_origin_base = v_tcp_base + np.cross(w_base, p_tcp_cam_base)
+        except Exception as e:
+            self.get_logger().warn(
+                f"TF Hinweis tcp->camera nicht verfügbar (nutze v_tcp direkt): {e}",
+                throttle_duration_sec=5.0,
+            )
 
         v_cam = np.zeros(6)
-        dt = 0.033
+        v_cam[:3] = cam_rot.inv().apply(v_cam_origin_base)
+        v_cam[3:] = cam_rot.inv().apply(w_base)
+        return v_cam
 
-        if self.last_position is not None:
-            dt = current_time - self.last_tf_stamp
-            if dt > 0.001:
-                dp_base = pos - self.last_position
-                v_cam[:3] = rot.inv().apply(dp_base) / dt
-                r_rel = self.last_rotation.inv() * rot
-                v_cam[3:] = r_rel.as_rotvec() / dt
+    def get_camera_velocity_from_tcp_pose(self):
+        with self.pose_lock:
+            if self.latest_v_cam is None:
+                return None, 0.0
 
-        self.last_position = pos
-        self.last_rotation = rot
-        self.last_tf_stamp = current_time
+            if self.latest_v_stamp != self.last_consumed_v_stamp:
+                self.last_consumed_v_stamp = self.latest_v_stamp
+                dt = max(self.latest_v_dt, 1.0 / float(self.predict_rate))
+                return self.latest_v_cam.copy(), dt
 
-        if False: #self.debug_mode:
-            self.get_logger().info(f"Transform: {t}")
-            self.get_logger().info(f"v_cam: {v_cam}")#, throttle_duration_sec=2.0)
-        return v_cam, dt
+        # Kein neues Pose-Sample seit letztem Predict: stationaere Annahme
+        return np.zeros(6), 1.0 / float(self.predict_rate)
 
     def timer_callback(self):
         """1. Predict Schritt: Wird mit fester Frequenz ausgeführt."""
@@ -212,9 +311,8 @@ class FilterNode(Node):
         if self.reference_keypoints_raw is None:
             return
 
-        # Kinematik via TF holen (zum aktuellen Zeitpunkt)
-        # Wir nutzen Time() -> 0, um den aktuellsten Transform zu bekommen
-        v_ee, dt = self.get_camera_velocity_from_tf(rclpy.time.Time())
+        # Kinematik aus zwei TCP-Posen berechnen und ins Kamera-Frame transformieren
+        v_ee, dt = self.get_camera_velocity_from_tcp_pose()
         
         if v_ee is None:
             return
