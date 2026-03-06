@@ -36,7 +36,7 @@ class IbvsTwistControllerNode(Node):
         # IBVS core parameters.
         self.declare_parameter('lambda_gain', 0.12)
         self.declare_parameter('dls_damping', 0.1)
-        self.declare_parameter('z_est', 0.5)
+        self.declare_parameter('z_est', 0.25)
         self.declare_parameter('publish_rate_hz', 30.0)
 
         # Safety and stop criteria.
@@ -355,6 +355,7 @@ class IbvsTwistControllerNode(Node):
                 cur_xy = self.last_proxy_cur_xy
                 des_xy = self.last_proxy_ref_xy
                 source = 'proxy'
+                self.maybe_log_status('Proxy mode active.')
             elif not fallback_to_matches:
                 self.goal_hold_start_sec = None
                 self.publish_goal(False)
