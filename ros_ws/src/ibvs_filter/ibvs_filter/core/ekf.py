@@ -68,7 +68,7 @@ class ExtendedKalmanFilter(BaseFilter):
             return
 
         # 1. Kinematik umrechnen
-        v_cam = self._transform_twist_ee_to_cam(v_ee)
+        v_cam = v_ee # self._transform_twist_ee_to_cam(v_ee)
         
         # WICHTIG: Den alten Zustand einfrieren, bevor wir irgendetwas berechnen!
         x_old = self.x.copy()
@@ -102,6 +102,7 @@ class ExtendedKalmanFilter(BaseFilter):
         z_k, H_raw, self.status = self._get_raw_measurement(current_pixels, desired_pixels)
         
         if z_k is None:
+            self.status = "REJECT (NO MATCHES)"
             return
 
         # 2. Initialisierung / Relokalisation abfangen
