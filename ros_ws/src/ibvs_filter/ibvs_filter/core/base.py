@@ -90,5 +90,17 @@ class BaseFilter:
         proj_hom = self.H_filtered @ hom_pts
         return np.vstack((proj_hom[0, :] / proj_hom[2, :], proj_hom[1, :] / proj_hom[2, :]))
 
+    def get_proxy_corners(self):
+        """Returns (proxy_ref_4x2, proxy_est_4x2_or_None)."""
+        if self.proxy_ref is None:
+            return None, None
+
+        proxy_ref = self.proxy_ref.copy()
+        proxy_est = None
+        if self.initialized and self.H_filtered is not None:
+            proxy_est = self.get_projected_points(proxy_ref.T).T
+
+        return proxy_ref, proxy_est
+
     def predict(self, v_ee, Z_est, dt): raise NotImplementedError
     def update(self, current_pixels, desired_pixels): raise NotImplementedError

@@ -295,6 +295,7 @@ class FilterNode(Node):
         with self.lock:
             p_trace = np.trace(self.filter.P) if hasattr(self.filter, 'P') else 0.0
             filter_status = self.filter.status
+            proxy_ref, proxy_est = self.filter.get_proxy_corners()
 
         # Wir zeichnen nur die aktuell gematchten Punkte, damit das Bild übersichtlich bleibt!
         if desired_pixels.shape[1] > 0:
@@ -319,10 +320,27 @@ class FilterNode(Node):
                     pt_proj = (int(proj_pixels[0, i]), int(proj_pixels[1, i]))
                     cv2.circle(cv_img, pt_proj, 2, (0, 255, 255), -1) 
 
+        # Proxy-Ecken visualisieren
+        if proxy_ref is not None and np.isfinite(proxy_ref).all():
+            pts_ref = np.round(proxy_ref).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(cv_img, [pts_ref], True, (0, 128, 255), 1, cv2.LINE_AA)
+            for i, p in enumerate(proxy_ref):
+                c = (int(p[0]), int(p[1]))
+                cv2.circle(cv_img, c, 4, (0, 128, 255), -1)
+                cv2.putText(cv_img, f"R{i}", (c[0] + 4, c[1] - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 128, 255), 1)
+
+        if proxy_est is not None and np.isfinite(proxy_est).all():
+            pts_est = np.round(proxy_est).astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(cv_img, [pts_est], True, (255, 255, 0), 1, cv2.LINE_AA)
+            for i, p in enumerate(proxy_est):
+                c = (int(p[0]), int(p[1]))
+                cv2.circle(cv_img, c, 4, (255, 255, 0), -1)
+                cv2.putText(cv_img, f"E{i}", (c[0] + 4, c[1] + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 0), 1)
+
         # --- UI Overlay (Texte und Boxen inkl. Legende) ---
         # Transparentes Overlay
         overlay = cv_img.copy()
-        box_w, box_h = 260, 170
+        box_w, box_h = 260, 210
         cv2.rectangle(overlay, (5, 5), (5 + box_w, 5 + box_h), (0, 0, 0), -1)
         
         alpha = 0.4 # Transparenz (40% Schwarz, 60% Bild)
@@ -368,6 +386,16 @@ class FilterNode(Node):
         # Filter (Gelb)
         cv2.circle(cv_img, (25, y_txt-5), 3, (0, 255, 255), -1)
         cv2.putText(cv_img, "Est (Filter)", (40, y_txt), font, font_scale, white, thickness)
+        y_txt += line_h
+
+        # Proxy Ref (Orange)
+        cv2.circle(cv_img, (25, y_txt-5), 3, (0, 128, 255), -1)
+        cv2.putText(cv_img, "Proxy Ref", (40, y_txt), font, font_scale, white, thickness)
+        y_txt += line_h
+
+        # Proxy Est (Cyan)
+        cv2.circle(cv_img, (25, y_txt-5), 3, (255, 255, 0), -1)
+        cv2.putText(cv_img, "Proxy Est", (40, y_txt), font, font_scale, white, thickness)
 
         # Publishen
         debug_msg = self.cv_bridge.cv2_to_imgmsg(cv_img, "bgr8")
