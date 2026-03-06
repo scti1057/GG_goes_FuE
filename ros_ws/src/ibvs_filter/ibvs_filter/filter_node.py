@@ -29,7 +29,7 @@ class FilterNode(Node):
         self.declare_parameter('gate_threshold', 20.0)
         
         self.declare_parameter('base_frame', 'base_link') 
-        self.declare_parameter('camera_frame', 'tool0') # camera_color_optical_frame
+        self.declare_parameter('camera_frame', 'camera_color_optical_frame') # camera_color_optical_frame
         self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
         
         # Debug Flag
@@ -131,7 +131,10 @@ class FilterNode(Node):
         self.last_position = pos
         self.last_rotation = rot
         self.last_tf_stamp = current_time
-        self.get_logger().info(f"v_cam: {v_cam}")#, throttle_duration_sec=2.0)
+
+        if self.debug_mode:
+            self.get_logger().info(f"Transform: {t}")
+            self.get_logger().info(f"v_cam: {v_cam}")#, throttle_duration_sec=2.0)
         return v_cam, dt
 
     def sync_callback(self, matches_msg: Matches, img_msg: Image):
@@ -145,6 +148,7 @@ class FilterNode(Node):
         # 1. Kinematik via TF holen
         v_ee, dt = self.get_camera_velocity_from_tf(matches_msg.header.stamp)
         if v_ee is None:
+            self.get_logger().warn("No velocity (v_ee = None)...", throttle_duration_sec=2.0)
             return 
 
         # 2. Matches extrahieren und zuordnen
