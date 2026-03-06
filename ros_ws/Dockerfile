@@ -18,12 +18,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip python3-venv \
     python3-colcon-common-extensions \
     python3-rosdep python3-vcstool \
-    python3-numpy python3-opencv python3-torch python3-tqdm \
+    python3-numpy python3-opencv python3-tqdm \
     ros-${ROS_DISTRO}-cv-bridge \
     ros-${ROS_DISTRO}-rviz2 \
     && locale-gen en_US.UTF-8 \
     && update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir --upgrade pip \
+    && python3 -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 \
+       torch==2.5.1
 
 RUN groupadd --gid ${USER_GID} ${USERNAME} \
     && useradd --uid ${USER_UID} --gid ${USER_GID} --create-home --shell /bin/bash ${USERNAME} \

@@ -9,14 +9,18 @@ source /home/ros/ros2_ws/install/setup.bash
 # Start the realsense hardware driver
 echo "Starting the realsense ros driver..."
 
+# Allow easy profile overrides from compose/.env without editing this script.
+COLOR_PROFILE="${RS_COLOR_PROFILE:-640x480x60}"
+DEPTH_PROFILE="${RS_DEPTH_PROFILE:-640x480x60}"
+
 # Read params from file
 ros2 launch realsense2_camera rs_launch.py \
   align_depth.enable:=true \
   enable_depth:=true \
-  depth_module.depth_profile:=640x480x15 \
+  depth_module.depth_profile:=${DEPTH_PROFILE} \
   depth_module.depth_format:=Z16 \
   enable_color:=true \
-  rgb_camera.color_profile:=640x480x30 \
+  rgb_camera.color_profile:=${COLOR_PROFILE} \
   depth_module.emitter_enabled:=1 \
   depth_module.enable_auto_exposure:=true \
   spatial_filter.enable:=true \
