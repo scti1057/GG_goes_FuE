@@ -30,7 +30,7 @@ class FilterNode(Node):
 
         # --- Parameter ---
         self.declare_parameter('filter_type', 'ekf')
-        self.declare_parameter('q_noise', 1.0)
+        self.declare_parameter('q_noise', 1.0)  # EKF: 1.40
         self.declare_parameter('r_noise', 50.0)
         self.declare_parameter('z_depth', 0.25)
         self.declare_parameter('gate_threshold', 20.0)
@@ -390,6 +390,10 @@ class FilterNode(Node):
         dt = self.get_predict_dt()
         # Kinematik aus TCP-Posen berechnen und ins Kamera-Frame transformieren
         v_ee = self.get_camera_velocity_from_tcp_pose()
+        max_v_ee_trans = max(abs(v_ee[0]), abs(v_ee[1]), abs(v_ee[2]))
+        max_v_ee_rot = max(abs(v_ee[3]), abs(v_ee[4]), abs(v_ee[5]))
+        if max_v_ee_trans > 0.005 or max_v_ee_rot > 0.005:
+            self.get_logger().info(f"v_ee: {v_ee}, dt: {dt}")
 
         # Predict ausführen
         with self.lock:
