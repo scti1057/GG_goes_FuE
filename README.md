@@ -258,7 +258,7 @@ docker exec -it ros_ws bash -lc 'cd /home/ros_ws && source scripts/build_and_sou
 
 ## 6.3 Start session manager
 ```bash
-docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && python3 /home/ros_ws/scripts/ibvs_session_manager.py --debug'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && python3 /home/ros_ws/scripts/ibvs_session_manager.py --debug --device=cuda'
 ```
 
 Typical flow in manager:
@@ -386,3 +386,36 @@ When opening a new chat/session, include:
 - Whether session manager or manual node startup is used.
 
 This minimizes re-debugging and avoids repeating controller activation/QoS issues.
+
+## 11) EKF Filter Tuning (ibvs_filter)
+
+Start filter node:
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_node --ros-args -p filter_type:=ekf -p q_noise:=1.0 -p r_noise:=50.0 -p gate_threshold:=20.0 -p z_depth:=0.5 -p debug:=true'
+```
+
+Live tuning (without restart):
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node q_noise 0.5'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node r_noise 80.0'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node gate_threshold 20.0'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node z_depth 0.45'
+```
+
+Practical interpretation:
+- `q_noise` up: model less trusted, filter follows measurements more quickly.
+- `q_noise` down: smoother prediction, but can lag on fast motion.
+- `r_noise` up: measurements less trusted, stronger smoothing.
+- `r_noise` down: more reactive to matches, but noisier.
+- `gate_threshold` up: fewer outlier rejects; down: stricter reject behavior.
+
+Recommended tuning sequence:
+1. Keep robot/camera static. Increase `r_noise` until jitter of yellow projected points is visibly reduced.
+2. Move slowly in one axis. Increase `q_noise` until lag is acceptable without noisy oscillation.
+3. Introduce occasional bad matches (partial occlusion). Decrease `gate_threshold` until outliers are rejected, then back off slightly.
+4. Recheck with your normal motion speed.
+
+Useful gate references for 8D Mahalanobis gate:
+- ~15.5 (about 95% chi-square quantile, dof=8)
+- ~20.1 (about 99% chi-square quantile, dof=8)
+- ~26.1 (about 99.9% chi-square quantile, dof=8)
