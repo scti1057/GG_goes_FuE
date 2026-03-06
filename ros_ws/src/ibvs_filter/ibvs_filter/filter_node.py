@@ -11,7 +11,7 @@ import threading
 from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import CameraInfo, Image
 from geometry_msgs.msg import Twist
-from ibvs_msgs.msg import Matches, Keypoints
+from ibvs_msgs.msg import Matches, Keypoints, ProxyCorners
 from cv_bridge import CvBridge
 
 from ibvs_filter.core.ekf import ExtendedKalmanFilter
@@ -37,6 +37,7 @@ class FilterNode(Node):
         self.declare_parameter('camera_velocity_deadband_linear', 0.0)
         self.declare_parameter('camera_velocity_deadband_angular', 0.0)
         self.declare_parameter('camera_velocity_stale_timeout', 0.2)
+        self.declare_parameter('proxy_corners_topic', '/ibvs/filter/proxy_corners')
         self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
         
         # Debug Flag
@@ -59,6 +60,7 @@ class FilterNode(Node):
         self.camera_velocity_stale_timeout = float(
             self.get_parameter('camera_velocity_stale_timeout').value
         )
+        self.proxy_corners_topic = self.get_parameter('proxy_corners_topic').value
         self.debug_mode = self.get_parameter('debug').value
         self.predict_rate = self.get_parameter('predict_rate').value
         
@@ -100,6 +102,7 @@ class FilterNode(Node):
         
         # --- Publisher ---
         self.pub_filtered_points = self.create_publisher(Matches, '/ibvs/filtered_features', 10)
+        self.pub_proxy_corners = self.create_publisher(ProxyCorners, self.proxy_corners_topic, 10)
         if self.debug_mode:
             self.pub_debug_img = self.create_publisher(Image, '/ibvs/filter_debug_image', 10)
 
@@ -286,6 +289,7 @@ class FilterNode(Node):
             # Wir nutzen den Lock auch hier, damit sich der Zustand während der Projektion nicht ändert
             all_reference_pts = self.reference_keypoints_raw.reshape(-1, 2).T
             filtered_current_pts = self.filter.get_projected_points(all_reference_pts)
+            proxy_ref, proxy_est = self.filter.get_proxy_corners()
 
         # Nachricht im Matches-Format bauen
         out_msg = Matches()
@@ -299,6 +303,36 @@ class FilterNode(Node):
         out_msg.sim = [1.0] * num_pts # Da vom Filter generiert, setzen wir Confidence auf 1.0
         
         self.pub_filtered_points.publish(out_msg)
+        self.publish_proxy_corners(proxy_ref, proxy_est)
+
+    def publish_proxy_corners(self, proxy_ref, proxy_est):
+        msg = ProxyCorners()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.camera_frame
+        msg.valid = False
+        msg.quality = 0.0
+        msg.ref_xy = []
+        msg.cur_xy = []
+
+        if proxy_ref is None or proxy_est is None:
+            self.pub_proxy_corners.publish(msg)
+            return
+
+        if not (np.isfinite(proxy_ref).all() and np.isfinite(proxy_est).all()):
+            self.pub_proxy_corners.publish(msg)
+            return
+
+        proxy_ref = np.asarray(proxy_ref, dtype=np.float32)
+        proxy_est = np.asarray(proxy_est, dtype=np.float32)
+        if proxy_ref.shape != (4, 2) or proxy_est.shape != (4, 2):
+            self.pub_proxy_corners.publish(msg)
+            return
+
+        msg.valid = True
+        msg.quality = 1.0
+        msg.ref_xy = proxy_ref.reshape(-1).tolist()
+        msg.cur_xy = proxy_est.reshape(-1).tolist()
+        self.pub_proxy_corners.publish(msg)
 
     def matches_callback(self, matches_msg: Matches):
         """2. Update Schritt: Wird ausgeführt, wenn neue Matches da sind."""
