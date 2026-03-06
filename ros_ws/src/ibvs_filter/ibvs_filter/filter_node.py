@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import cv2
+import threading
 
 import tf2_ros
 import message_filters
-from std_msgs.msg import Float32MultiArray
 from sensor_msgs.msg import CameraInfo, Image
 from ibvs_msgs.msg import Matches, Keypoints
 from cv_bridge import CvBridge
@@ -25,8 +28,9 @@ class FilterNode(Node):
         self.declare_parameter('filter_type', 'ekf')
         self.declare_parameter('q_noise', 1.0)
         self.declare_parameter('r_noise', 50.0)
-        self.declare_parameter('z_depth', 0.5)
+        self.declare_parameter('z_depth', 0.25)
         self.declare_parameter('gate_threshold', 20.0)
+        self.declare_parameter('predict_rate', 60.0) # Hz (Reduziert für Performance, 60Hz reicht völlig)
         
         self.declare_parameter('base_frame', 'base_link') 
         self.declare_parameter('camera_frame', 'camera_color_optical_frame') # camera_color_optical_frame
@@ -40,11 +44,19 @@ class FilterNode(Node):
         self.base_frame = self.get_parameter('base_frame').value
         self.camera_frame = self.get_parameter('camera_frame').value
         self.debug_mode = self.get_parameter('debug').value
+        self.predict_rate = self.get_parameter('predict_rate').value
         
         # --- Zustandsvariablen ---
         self.K = None
         self.filter = None
         self.reference_keypoints_raw = None 
+        
+        # Thread-Safety: Lock für den Filter-Zustand (da Predict/Update nun parallel laufen können)
+        self.lock = threading.Lock()
+        
+        # Caching für Debug-Visualisierung (da Update und Image nun asynchron sind)
+        self.last_current_pixels = None
+        self.last_desired_pixels = None
         
         self.last_tf_stamp = None
         self.last_position = None
@@ -57,23 +69,28 @@ class FilterNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
+        # --- Callback Group für Multi-Threading ---
+        # Erlaubt, dass Timer und Subscriber parallel verarbeitet werden
+        self.cb_group = ReentrantCallbackGroup()
+
         # --- Subscriber (Asynchron) ---
-        self.sub_cam_info = self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self.cam_info_callback, 10)
-        self.sub_ref = self.create_subscription(Keypoints, '/ibvs/reference/keypoints', self.reference_callback, 10)
+        self.sub_cam_info = self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self.cam_info_callback, 10, callback_group=self.cb_group)
+        self.sub_ref = self.create_subscription(Keypoints, '/ibvs/reference/keypoints', self.reference_callback, 10, callback_group=self.cb_group)
         
         # --- Publisher ---
-        self.pub_filtered_points = self.create_publisher(Float32MultiArray, '/ibvs/filtered_features', 10)
+        self.pub_filtered_points = self.create_publisher(Matches, '/ibvs/filtered_features', 10)
         if self.debug_mode:
             self.pub_debug_img = self.create_publisher(Image, '/ibvs/filter_debug_image', 10)
 
-        # --- Synchronisierte Subscriber (Matches + Image für Debug) ---
-        self.sub_matches = message_filters.Subscriber(self, Matches, '/ibvs/matches')
-        self.sub_image = message_filters.Subscriber(self, Image, self.get_parameter('image_topic').value)
+        # --- Asynchrone Subscriber & Timer ---
+        # 1. Update Schritt (Event-basiert bei neuen Matches)
+        self.sub_matches = self.create_subscription(Matches, '/ibvs/matches', self.matches_callback, 10, callback_group=self.cb_group)
         
-        self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.sub_matches, self.sub_image], queue_size=10, slop=0.05
-        )
-        self.ts.registerCallback(self.sync_callback)
+        # 2. Debug Image (Event-basiert bei neuem Bild)
+        self.sub_image = self.create_subscription(Image, self.get_parameter('image_topic').value, self.image_callback, 10, callback_group=self.cb_group)
+
+        # 3. Predict Schritt (Zeit-basiert, fester Takt)
+        self.timer = self.create_timer(1.0 / self.predict_rate, self.timer_callback, callback_group=self.cb_group)
 
         self.get_logger().info(f"Filter Node gestartet. Modus: {self.filter_type}. Warte auf K-Matrix und Referenz...")
 
@@ -132,24 +149,50 @@ class FilterNode(Node):
         self.last_rotation = rot
         self.last_tf_stamp = current_time
 
-        if self.debug_mode:
+        if False: #self.debug_mode:
             self.get_logger().info(f"Transform: {t}")
             self.get_logger().info(f"v_cam: {v_cam}")#, throttle_duration_sec=2.0)
         return v_cam, dt
 
-    def sync_callback(self, matches_msg: Matches, img_msg: Image):
-        """Wird aufgerufen, wenn Matches und das zugehörige Bild ankommen."""
+    def timer_callback(self):
+        """1. Predict Schritt: Wird mit fester Frequenz ausgeführt."""
         if self.filter is None:
-            self.get_logger().warn("Warte auf CameraInfo...", throttle_duration_sec=2.0)
             return
         if self.reference_keypoints_raw is None:
             return
 
-        # 1. Kinematik via TF holen
-        v_ee, dt = self.get_camera_velocity_from_tf(matches_msg.header.stamp)
+        # Kinematik via TF holen (zum aktuellen Zeitpunkt)
+        # Wir nutzen Time() -> 0, um den aktuellsten Transform zu bekommen
+        v_ee, dt = self.get_camera_velocity_from_tf(rclpy.time.Time())
+        
         if v_ee is None:
-            self.get_logger().warn("No velocity (v_ee = None)...", throttle_duration_sec=2.0)
-            return 
+            return
+
+        # Predict ausführen
+        with self.lock:
+            self.filter.predict(v_ee, self.z_depth, dt)
+            
+            # Resultat publishen (ANSATZ B: Alle Referenzpunkte projizieren)
+            # Wir nutzen den Lock auch hier, damit sich der Zustand während der Projektion nicht ändert
+            all_reference_pts = self.reference_keypoints_raw.reshape(-1, 2).T
+            filtered_current_pts = self.filter.get_projected_points(all_reference_pts)
+
+        # Nachricht im Matches-Format bauen
+        out_msg = Matches()
+        out_msg.header.stamp = self.get_clock().now().to_msg()
+        out_msg.header.frame_id = self.camera_frame
+        
+        num_pts = filtered_current_pts.shape[1]
+        # Die ID entspricht dem Index im Referenz-Array. Wir stellen sicher, dass es ints sind.
+        out_msg.ref_id = [int(i) for i in range(num_pts)] 
+        out_msg.xy = filtered_current_pts.T.flatten().tolist()
+        out_msg.sim = [1.0] * num_pts # Da vom Filter generiert, setzen wir Confidence auf 1.0
+        
+        self.pub_filtered_points.publish(out_msg)
+
+    def matches_callback(self, matches_msg: Matches):
+        """2. Update Schritt: Wird ausgeführt, wenn neue Matches da sind."""
+        if self.filter is None or self.reference_keypoints_raw is None: return
 
         # 2. Matches extrahieren und zuordnen
         num_matches = len(matches_msg.ref_id)
@@ -168,30 +211,27 @@ class FilterNode(Node):
         current_pixels = current_pixels[:, :valid_count]
         desired_pixels = desired_pixels[:, :valid_count]
 
-        # 3. Filter updaten oder blind prädizieren
-        if valid_count < 4:
-            self.filter.predict(v_ee, self.z_depth, dt)
-        else:
-            self.filter.predict(v_ee, self.z_depth, dt)
-            self.filter.update(current_pixels, desired_pixels)
+        # Caching für Debugging
+        self.last_current_pixels = current_pixels
+        self.last_desired_pixels = desired_pixels
 
-        # 4. Resultat publishen (ANSATZ B: Alle Referenzpunkte projizieren)
+        # Update ausführen (nur wenn genug Matches da sind)
+        if valid_count >= 4:
+            with self.lock:
+                self.filter.update(current_pixels, desired_pixels)
+
+    def image_callback(self, img_msg: Image):
+        """3. Debug Schritt: Zeichnet Overlay, wenn ein Bild kommt."""
+        if not self.debug_mode or self.filter is None:
+            return
+            
+        # Wir nutzen die gecacheten Matches vom letzten Update-Schritt
+        if self.last_desired_pixels is None or self.last_current_pixels is None:
+            return
+
         if self.debug_mode:
-            self.get_logger().info(f"Filter status: {self.filter.status}")
-        if True: #self.filter.status in ["UPDATE", "INIT", "PREDICT", "REJECT (OUTLIER)", "REJECT (GEOMETRY)"]:
-            all_reference_pts = self.reference_keypoints_raw.reshape(-1, 2).T
-            
-            # Die Magie: Wir filtern nicht die Features direkt, sondern nutzen die Homographie 
-            # des Filters, um ALLE echten Referenzpunkte sauber in das aktuelle Bild zu projizieren!
-            filtered_current_pts = self.filter.get_projected_points(all_reference_pts)
-            
-            out_msg = Float32MultiArray()
-            out_msg.data = filtered_current_pts.T.flatten().tolist()
-            self.pub_filtered_points.publish(out_msg)
-
-            # 5. Debug Bild generieren und publishen
-            if self.debug_mode:
-                self.publish_debug_image(img_msg, desired_pixels, current_pixels)
+            # self.get_logger().info(f"Filter status: {self.filter.status}")
+            self.publish_debug_image(img_msg, self.last_desired_pixels, self.last_current_pixels)
 
     def publish_debug_image(self, img_msg, desired_pixels, current_pixels):
         try:
@@ -200,57 +240,83 @@ class FilterNode(Node):
             self.get_logger().error(f"CV Bridge Fehler: {e}")
             return
 
+        # Filter-Infos holen (Thread-Safe)
+        with self.lock:
+            p_trace = np.trace(self.filter.P) if hasattr(self.filter, 'P') else 0.0
+            filter_status = self.filter.status
+
         # Wir zeichnen nur die aktuell gematchten Punkte, damit das Bild übersichtlich bleibt!
         if desired_pixels.shape[1] > 0:
             # Hole die projizierten (gefilterten) Koordinaten für diese spezifischen Matches
-            proj_pixels = self.filter.get_projected_points(desired_pixels)
+            # Thread-Safe Zugriff auf den Filter
+            with self.lock:
+                proj_pixels = self.filter.get_projected_points(desired_pixels)
 
             for i in range(desired_pixels.shape[1]):
                 pt_des = (int(desired_pixels[0, i]), int(desired_pixels[1, i]))
                 pt_curr = (int(current_pixels[0, i]), int(current_pixels[1, i]))
                 
                 # 1. Soll-Position (Rot)
-                cv2.circle(cv_img, pt_des, 4, (0, 0, 255), -1)
+                # cv2.circle(cv_img, pt_des, 2, (0, 0, 255), -1)
                 # 2. Rohe Messung (Blau)
-                cv2.circle(cv_img, pt_curr, 4, (255, 0, 0), -1)
+                cv2.circle(cv_img, pt_curr, 2, (255, 0, 0), -1)
                 # 3. Matching Linie (Grün)
-                cv2.line(cv_img, pt_des, pt_curr, (0, 255, 0), 1)
+                # cv2.line(cv_img, pt_des, pt_curr, (0, 255, 0), 1)
 
                 # 4. Gefilterte Schätzung (Gelb)
                 if proj_pixels.shape == desired_pixels.shape:
                     pt_proj = (int(proj_pixels[0, i]), int(proj_pixels[1, i]))
-                    cv2.circle(cv_img, pt_proj, 5, (0, 255, 255), -1) 
+                    cv2.circle(cv_img, pt_proj, 2, (0, 255, 255), -1) 
 
         # --- UI Overlay (Texte und Boxen inkl. Legende) ---
-        # 1. Hintergrundkasten vergrößern (jetzt bis Y=190 statt 75)
-        cv2.rectangle(cv_img, (5, 5), (400, 190), (0, 0, 0, 0), -1)
+        # Transparentes Overlay
+        overlay = cv_img.copy()
+        box_w, box_h = 260, 170
+        cv2.rectangle(overlay, (5, 5), (5 + box_w, 5 + box_h), (0, 0, 0), -1)
         
-        # 2. Bestehender Status-Text
-        cv2.putText(cv_img, f"Filter: {self.filter_type.upper()}", (15, 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        alpha = 0.4 # Transparenz (40% Schwarz, 60% Bild)
+        cv2.addWeighted(overlay, alpha, cv_img, 1 - alpha, 0, cv_img)
         
-        color = (0, 255, 0) if "UPDATE" in self.filter.status else (0, 0, 255)
-        cv2.putText(cv_img, f"Status: {self.filter.status}", (15, 60), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        # Text Setup
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+        white = (255, 255, 255)
+        x_txt, y_txt = 15, 25
+        line_h = 20
+        
+        # 1. Info Block
+        cv2.putText(cv_img, f"Filter: {self.filter_type.upper()}", (x_txt, y_txt), font, font_scale, white, thickness)
+        y_txt += line_h
+        
+        color_status = (0, 255, 0) if "UPDATE" in filter_status else (0, 0, 255)
+        cv2.putText(cv_img, f"Status: {filter_status}", (x_txt, y_txt), font, font_scale, color_status, thickness)
+        y_txt += line_h
 
-        # 3. Trennlinie zur Legende
-        cv2.line(cv_img, (10, 75), (390, 75), (100, 100, 100), 1)
+        cv2.putText(cv_img, f"Matches: {desired_pixels.shape[1]}", (x_txt, y_txt), font, font_scale, white, thickness)
+        y_txt += line_h
+        
+        cv2.putText(cv_img, f"Uncertainty: {p_trace:.2f}", (x_txt, y_txt), font, font_scale, white, thickness)
+        y_txt += 10
 
-        # 4. Legenden-Einträge zeichnen
-        # Soll-Position (Rot)
-        cv2.circle(cv_img, (25, 100), 5, (0, 0, 255), -1)
-        cv2.putText(cv_img, "Soll-Position (Referenz)", (45, 105), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        # 2. Trennlinie
+        cv2.line(cv_img, (10, y_txt), (box_w, y_txt), (150, 150, 150), 1)
+        y_txt += 20
 
-        # Rohe Messung (Blau)
-        cv2.circle(cv_img, (25, 135), 5, (255, 0, 0), -1)
-        cv2.putText(cv_img, "Rohe Messung (Kamera)", (45, 140), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        # 3. Legende
+        # Soll (Rot)
+        cv2.circle(cv_img, (25, y_txt-5), 3, (0, 0, 255), -1)
+        cv2.putText(cv_img, "Ref (Soll)", (40, y_txt), font, font_scale, white, thickness)
+        y_txt += line_h
 
-        # Gefilterte Schätzung (Gelb)
-        cv2.circle(cv_img, (25, 170), 5, (0, 255, 255), -1)
-        cv2.putText(cv_img, "Filter-Schaetzung", (45, 175), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        # Ist (Blau)
+        cv2.circle(cv_img, (25, y_txt-5), 3, (255, 0, 0), -1)
+        cv2.putText(cv_img, "Meas (Ist)", (40, y_txt), font, font_scale, white, thickness)
+        y_txt += line_h
+
+        # Filter (Gelb)
+        cv2.circle(cv_img, (25, y_txt-5), 3, (0, 255, 255), -1)
+        cv2.putText(cv_img, "Est (Filter)", (40, y_txt), font, font_scale, white, thickness)
 
         # Publishen
         debug_msg = self.cv_bridge.cv2_to_imgmsg(cv_img, "bgr8")
@@ -261,8 +327,11 @@ class FilterNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = FilterNode()
+    # MultiThreadedExecutor verhindert, dass die Bildverarbeitung den Filter blockiert
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

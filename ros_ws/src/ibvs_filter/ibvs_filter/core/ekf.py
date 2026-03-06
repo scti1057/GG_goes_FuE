@@ -68,7 +68,7 @@ class ExtendedKalmanFilter(BaseFilter):
             return
 
         # 1. Kinematik umrechnen
-        v_cam = v_ee # self._transform_twist_ee_to_cam(v_ee)
+        v_cam = self._transform_twist_ee_to_cam(v_ee)
         
         # WICHTIG: Den alten Zustand einfrieren, bevor wir irgendetwas berechnen!
         x_old = self.x.copy()
