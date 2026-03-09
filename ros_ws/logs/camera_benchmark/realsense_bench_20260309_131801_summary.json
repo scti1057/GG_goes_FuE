@@ -1,0 +1,189 @@
+{
+  "run_id": "realsense_bench_20260309_131801",
+  "started_at_utc": "2026-03-09T12:18:03.046065+00:00",
+  "ended_at_utc": "2026-03-09T12:24:06.225051+00:00",
+  "script": "realsense_camera_benchmark.py",
+  "selected_source": "direct",
+  "source_reason": "no messages on /camera/camera/color/image_raw",
+  "args": {
+    "source": "auto",
+    "mode": "both",
+    "both_order": "rgb-rgbd",
+    "duration_sec": 180.0,
+    "warmup_sec": 2.0,
+    "skip_warmup": false,
+    "width": 640,
+    "height": 480,
+    "fps": 60,
+    "interval_sec": 1.0,
+    "frame_timeout_sec": 2.0,
+    "serial": "",
+    "ros_color_topic": "/camera/camera/color/image_raw",
+    "ros_depth_topic": "/camera/camera/aligned_depth_to_color/image_raw",
+    "ros_probe_timeout_sec": 2.5,
+    "ros_require_depth": false,
+    "log_dir": "logs/camera_benchmark",
+    "log_frames": false
+  },
+  "interval_csv": "/home/ros_ws/logs/camera_benchmark/realsense_bench_20260309_131801_intervals.csv",
+  "frame_csv": null,
+  "scenarios": [
+    {
+      "source": "direct",
+      "scenario": "rgb",
+      "started_at_utc": "2026-03-09T12:18:03.046065+00:00",
+      "ended_at_utc": "2026-03-09T12:21:03.065628+00:00",
+      "requested_config": {
+        "width": 640,
+        "height": 480,
+        "fps": 60,
+        "enable_depth": false,
+        "duration_sec": 180.0,
+        "warmup_sec": 2.0
+      },
+      "camera_info": {
+        "name": "Intel RealSense D435",
+        "serial_number": "151222071687",
+        "firmware_version": "5.17.0.10",
+        "product_line": "D400"
+      },
+      "active_streams": [
+        {
+          "stream": "color",
+          "format": "bgr8",
+          "fps": 60,
+          "width": 640,
+          "height": 480
+        }
+      ],
+      "stats": {
+        "capture_duration_sec": 180.01543234696146,
+        "total_color_frames": 10716,
+        "total_depth_frames": null,
+        "avg_color_fps": 59.52822966503226,
+        "avg_depth_fps": null,
+        "avg_fps_primary": 59.52822966503226,
+        "dropped_color_frames_est": 0,
+        "dropped_depth_frames_est": null,
+        "non_monotonic_color_frame_numbers": 0,
+        "missing_depth_frames": null,
+        "capture_timeouts": 0,
+        "warmup_frames_color": 97,
+        "warmup_frames_depth": null,
+        "warmup_timeouts": 0,
+        "host_color_dt_sec_p50": 0.01679854199755937,
+        "host_color_dt_sec_p90": 0.016981350583955647,
+        "host_color_dt_sec_p99": 0.017817104056011886,
+        "cam_color_dt_sec_p50": 0.016798583984375,
+        "cam_color_dt_sec_p90": 0.0167998046875,
+        "cam_color_dt_sec_p99": 0.0168017578125,
+        "cam_depth_dt_sec_p50": null,
+        "cam_depth_dt_sec_p90": null,
+        "cam_depth_dt_sec_p99": null,
+        "fps_first20_avg": 59.52850708571428,
+        "fps_last20_avg": 59.52835359459459,
+        "fps_drift_pct_first20_to_last20": -0.0002578447322202537
+      },
+      "timestamps": {
+        "timestamp_domain": "global_time",
+        "first_color_timestamp_ms": 1773058683050.677,
+        "last_color_timestamp_ms": 1773058863043.9646,
+        "color_timestamp_span_sec": 179.99328759765626,
+        "first_depth_timestamp_ms": null,
+        "last_depth_timestamp_ms": null,
+        "depth_timestamp_span_sec": null,
+        "host_start_wall_ns": 1773058683046147659,
+        "host_end_wall_ns": 1773058863065647160
+      }
+    },
+    {
+      "source": "direct",
+      "scenario": "rgbd",
+      "started_at_utc": "2026-03-09T12:21:05.675879+00:00",
+      "ended_at_utc": "2026-03-09T12:24:05.697362+00:00",
+      "requested_config": {
+        "width": 640,
+        "height": 480,
+        "fps": 60,
+        "enable_depth": true,
+        "duration_sec": 180.0,
+        "warmup_sec": 2.0
+      },
+      "camera_info": {
+        "name": "Intel RealSense D435",
+        "serial_number": "151222071687",
+        "firmware_version": "5.17.0.10",
+        "product_line": "D400"
+      },
+      "active_streams": [
+        {
+          "stream": "depth",
+          "format": "z16",
+          "fps": 60,
+          "width": 640,
+          "height": 480
+        },
+        {
+          "stream": "color",
+          "format": "bgr8",
+          "fps": 60,
+          "width": 640,
+          "height": 480
+        }
+      ],
+      "stats": {
+        "capture_duration_sec": 180.01704014802817,
+        "total_color_frames": 10716,
+        "total_depth_frames": 10716,
+        "avg_color_fps": 59.527697995635435,
+        "avg_depth_fps": 59.527697995635435,
+        "avg_fps_primary": 59.527697995635435,
+        "dropped_color_frames_est": 0,
+        "dropped_depth_frames_est": 0,
+        "non_monotonic_color_frame_numbers": 0,
+        "missing_depth_frames": 0,
+        "capture_timeouts": 0,
+        "warmup_frames_color": 94,
+        "warmup_frames_depth": 94,
+        "warmup_timeouts": 0,
+        "host_color_dt_sec_p50": 0.016794095980003476,
+        "host_color_dt_sec_p90": 0.017510205018334092,
+        "host_color_dt_sec_p99": 0.018018504658248276,
+        "cam_color_dt_sec_p50": 0.016798583984375,
+        "cam_color_dt_sec_p90": 0.016799560546875,
+        "cam_color_dt_sec_p99": 0.016802001953125,
+        "cam_depth_dt_sec_p50": 0.016798583984375,
+        "cam_depth_dt_sec_p90": 0.016799560546875,
+        "cam_depth_dt_sec_p99": 0.016802001953125,
+        "fps_first20_avg": 59.52663519444445,
+        "fps_last20_avg": 59.52771397297297,
+        "fps_drift_pct_first20_to_last20": 0.0018122618975390907
+      },
+      "timestamps": {
+        "timestamp_domain": "global_time",
+        "first_color_timestamp_ms": 1773058865687.293,
+        "last_color_timestamp_ms": 1773059045674.7664,
+        "color_timestamp_span_sec": 179.98747338867187,
+        "first_depth_timestamp_ms": 1773058865687.1904,
+        "last_depth_timestamp_ms": 1773059045674.6624,
+        "depth_timestamp_span_sec": 179.98747192382814,
+        "host_start_wall_ns": 1773058865675892063,
+        "host_end_wall_ns": 1773059045697377554
+      }
+    }
+  ],
+  "comparison": {
+    "metric": "avg_fps_primary",
+    "avg_fps_primary_rgb": 59.52822966503226,
+    "avg_fps_primary_rgbd": 59.527697995635435,
+    "delta_rgbd_minus_rgb": -0.0005316693968282493,
+    "delta_percent_vs_rgb": -0.0008931382636775433,
+    "dropped_color_frames_est_rgb": 0,
+    "dropped_color_frames_est_rgbd": 0
+  },
+  "notes": [
+    "auto source selection uses ROS topic activity on ros_color_topic.",
+    "direct mode can fail if another process already owns the camera device.",
+    "ROS mode measures topic throughput, not direct USB camera throughput."
+  ]
+}

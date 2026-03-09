@@ -1,0 +1,90 @@
+{
+  "run_id": "realsense_bench_20260309_145801",
+  "started_at_utc": "2026-03-09T13:58:01.758927+00:00",
+  "ended_at_utc": "2026-03-09T14:01:03.845928+00:00",
+  "script": "realsense_camera_benchmark.py",
+  "selected_source": "ros",
+  "source_reason": "forced by --source",
+  "args": {
+    "source": "ros",
+    "mode": "rgbd",
+    "both_order": "rgb-rgbd",
+    "duration_sec": 180.0,
+    "warmup_sec": 2.0,
+    "skip_warmup": false,
+    "width": 640,
+    "height": 480,
+    "fps": 60,
+    "interval_sec": 1.0,
+    "frame_timeout_sec": 2.0,
+    "serial": "",
+    "ros_color_topic": "/camera/camera/color/image_raw",
+    "ros_depth_topic": "/camera/camera/depth/image_rect_raw",
+    "ros_probe_timeout_sec": 2.5,
+    "ros_start_timeout_sec": 15.0,
+    "ros_require_depth": true,
+    "log_dir": "logs/camera_benchmark",
+    "log_frames": false
+  },
+  "interval_csv": "/home/ros_ws/logs/camera_benchmark/realsense_bench_20260309_145801_intervals.csv",
+  "frame_csv": null,
+  "scenarios": [
+    {
+      "source": "ros",
+      "scenario": "rgbd",
+      "started_at_utc": "2026-03-09T13:58:01.758927+00:00",
+      "ended_at_utc": "2026-03-09T14:01:03.841590+00:00",
+      "requested_config": {
+        "mode": "topic",
+        "duration_sec": 180.0,
+        "warmup_sec": 2.0,
+        "color_topic": "/camera/camera/color/image_raw",
+        "depth_topic": "/camera/camera/depth/image_rect_raw"
+      },
+      "camera_info": null,
+      "active_streams": null,
+      "stats": {
+        "capture_duration_sec": 180.01637676300015,
+        "total_color_frames": 7099,
+        "total_depth_frames": 8866,
+        "avg_color_fps": 39.43530098567732,
+        "avg_depth_fps": 49.251074593466,
+        "avg_fps_primary": 39.43530098567732,
+        "dropped_color_frames_est": 3618,
+        "dropped_depth_frames_est": 1849,
+        "non_monotonic_color_frame_numbers": null,
+        "missing_depth_frames": 0,
+        "capture_timeouts": 0,
+        "host_color_dt_sec_p50": 0.016991734504699707,
+        "host_color_dt_sec_p90": 0.05015147440135479,
+        "host_color_dt_sec_p99": 0.10032826210604981,
+        "ros_color_stamp_dt_sec_p50": 0.016798973083496094,
+        "ros_color_stamp_dt_sec_p90": 0.050395965576171875,
+        "ros_color_stamp_dt_sec_p99": 0.10079193830490112,
+        "ros_depth_stamp_dt_sec_p50": 0.016798734664916992,
+        "ros_depth_stamp_dt_sec_p90": 0.033597469329833984,
+        "ros_depth_stamp_dt_sec_p99": 0.05039834976196289,
+        "fps_first20_avg": 38.41193028571429,
+        "fps_last20_avg": 37.798878675675674,
+        "fps_drift_pct_first20_to_last20": -1.5959927175714372
+      },
+      "timestamps": {
+        "timestamp_domain": "ROS_TIME",
+        "first_color_timestamp_sec": 1773064683.7944393,
+        "last_color_timestamp_sec": 1773064863.8104877,
+        "color_timestamp_span_sec": 180.01604843139648,
+        "first_depth_timestamp_sec": 1773064683.8112378,
+        "last_depth_timestamp_sec": 1773064863.7936885,
+        "depth_timestamp_span_sec": 179.98245072364807,
+        "host_start_wall_ns": 1773064683823550529,
+        "host_end_wall_ns": 1773064863841610276
+      }
+    }
+  ],
+  "comparison": null,
+  "notes": [
+    "auto source selection uses ROS topic activity on ros_color_topic.",
+    "direct mode can fail if another process already owns the camera device.",
+    "ROS mode measures topic throughput, not direct USB camera throughput."
+  ]
+}

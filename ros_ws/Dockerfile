@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install --no-cache-dir --upgrade pip \
+    && python3 -m pip install --no-cache-dir pyrealsense2==2.56.5.9235 \
     && python3 -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 \
        torch==2.5.1
 

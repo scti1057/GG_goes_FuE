@@ -9,6 +9,7 @@ services:
         USER_GID: ${HOST_GID:-1000}
     image: ros_ws:local
     container_name: ros_ws
+    privileged: true
     network_mode: host
     gpus: all
     environment:
@@ -23,6 +24,7 @@ services:
       - ./:/home/ros_ws
       - ${XAUTHORITY}:${XAUTHORITY}:rw
       - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev:/dev
     working_dir: /home/ros_ws
     tty: true
     stdin_open: true
