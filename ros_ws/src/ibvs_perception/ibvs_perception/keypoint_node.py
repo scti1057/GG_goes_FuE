@@ -24,7 +24,7 @@ class KeypointNode(Node):
 
         # Topics
         self.declare_parameter('input_topic', '/camera/camera/color/image_raw/compressed')
-        self.declare_parameter('depth_topic', '/camera/camera/aligned_depth_to_color/image_raw/compressedDepth')
+        self.declare_parameter('depth_topic', 'lis')
         self.declare_parameter('keypoints_topic', '/ibvs/keypoints')
 
         # Debug topics
