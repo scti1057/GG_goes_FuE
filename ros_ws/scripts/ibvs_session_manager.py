@@ -305,13 +305,10 @@ class IbvsSessionManager:
     def set_camera_processing_mode(self, mode_name: str, enabled: bool) -> bool:
         target = {
             "align_depth.enable": enabled,
-            "spatial_filter.enable": enabled,
-            "temporal_filter.enable": enabled,
-            "hole_filling_filter.enable": enabled,
         }
         print(
             f"\n[camera] Setze Modus '{mode_name}' auf Node {self.args.camera_node}: "
-            f"align/spatial/temporal/hole_filling = {enabled}"
+            f"align_depth.enable = {enabled}"
         )
 
         all_ok = True
@@ -329,6 +326,29 @@ class IbvsSessionManager:
                 "Aktion wird aus Sicherheitsgründen abgebrochen."
             )
         return all_ok
+
+    def set_camera_align_depth_mode(self, enabled: bool) -> bool:
+        print(
+            f"\n[camera] Setze {self.args.camera_node}.align_depth.enable = {enabled}"
+        )
+
+        # Avoid unnecessary runtime reconfigure: RealSense can be unstable on no-op sets.
+        cmd_get = ["ros2", "param", "get", self.args.camera_node, "align_depth.enable"]
+        rc_get, out_get = run_cmd(cmd_get, timeout_sec=float(self.args.camera_param_timeout))
+        if rc_get == 0:
+            current = self._parse_ros_bool_param_get(out_get)
+            if current is not None and current == enabled:
+                print(f"  - align_depth.enable: bereits {enabled}, kein Set nötig")
+                return True
+
+        ok = self._set_camera_param_bool("align_depth.enable", enabled)
+        print(f"  - align_depth.enable: {'ok' if ok else 'FEHLER'}")
+        if not ok:
+            print(
+                "[camera] Konnte align_depth.enable nicht setzen. "
+                "Aktion wird aus Sicherheitsgründen abgebrochen."
+            )
+        return ok
 
     def set_keypoint_depth_roi_mode(self, enabled: bool) -> bool:
         print(
@@ -365,9 +385,6 @@ class IbvsSessionManager:
             self.start_core()
             time.sleep(1.0)
 
-        # Tracking mode: maximize RGB throughput
-        if not self.set_camera_processing_mode("tracking", enabled=False):
-            return
         if not self.set_keypoint_depth_roi_mode(enabled=False):
             return
 
@@ -396,9 +413,20 @@ class IbvsSessionManager:
             self.start_core()
             time.sleep(1.0)
 
-        # Initialization mode: use full depth processing chain
-        if not self.set_camera_processing_mode("initialization", enabled=True):
+        # Always ensure aligned depth exists for initialization masking.
+        if not self.set_camera_align_depth_mode(enabled=True):
             return
+
+        if self.args.camera_runtime_mode_switch:
+            # Initialization mode: use full depth processing chain
+            if not self.set_camera_processing_mode("initialization", enabled=True):
+                return
+        else:
+            print(
+                "\n[camera] Initialisierungs-Mode-Switch deaktiviert "
+                "(--camera-runtime-mode-switch nicht gesetzt); "
+                "Post-Init-Set auf Tracking-Parameter bleibt aktiv."
+            )
         if not self.set_keypoint_depth_roi_mode(enabled=True):
             return
 
@@ -413,6 +441,9 @@ class IbvsSessionManager:
         done = self.wait_for_init_done(timeout_sec=self.args.init_wait_timeout)
         if done:
             print("[init] Initialisierung abgeschlossen.")
+            print("[init] Setze Kamera direkt auf Tracking-Parameter (Filter/Align aus) ...")
+            if not self.set_camera_processing_mode("post_init_tracking_prep", enabled=False):
+                return
         else:
             print("[init] Timeout beim Warten auf init_done=true.")
 
@@ -571,6 +602,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-param-retries", type=int, default=3)
     parser.add_argument("--camera-param-retry-wait", type=float, default=0.75)
     parser.add_argument("--camera-param-settle", type=float, default=1.0)
+    parser.add_argument(
+        "--camera-runtime-mode-switch",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "If enabled, toggle RealSense align_depth.enable at runtime "
+            "for initialization mode."
+        ),
+    )
 
     parser.add_argument("--keypoint-node", default="/keypoint_node")
     parser.add_argument("--keypoint-param-timeout", type=float, default=6.0)
