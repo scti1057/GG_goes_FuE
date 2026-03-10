@@ -390,8 +390,10 @@ This minimizes re-debugging and avoids repeating controller activation/QoS issue
 ## 11) EKF Filter Tuning (ibvs_filter)
 
 Start filter node:
+
+EKF (r=1.4, q=2.0, gate=20.0, z=0.25):
 ```bash
-docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_node --ros-args -p filter_type:=ekf -p q_noise:=1.0 -p r_noise:=50.0 -p gate_threshold:=20.0 -p z_depth:=0.5 -p debug:=true'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_node --ros-args -p filter_type:=ekf -p q_noise:=2.0 -p r_noise:=1.4 -p gate_threshold:=20.0 -p z_depth:=0.25 -p debug:=true'
 ```
 
 Live tuning (without restart):
