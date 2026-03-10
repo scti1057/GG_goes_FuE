@@ -4,12 +4,14 @@ import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import qos_profile_sensor_data
 import numpy as np
 import cv2
 import threading
+from typing import Any
 
 from rcl_interfaces.msg import SetParametersResult
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 from geometry_msgs.msg import Twist
 from ibvs_msgs.msg import Matches, Keypoints, ProxyCorners
 from cv_bridge import CvBridge
@@ -29,7 +31,7 @@ class FilterNode(Node):
         self.declare_parameter('r_noise', 50.0)
         self.declare_parameter('z_depth', 0.25)
         self.declare_parameter('gate_threshold', 20.0)
-        self.declare_parameter('predict_rate', 60.0) # Hz (Reduziert für Performance, 60Hz reicht völlig)
+        self.declare_parameter('predict_rate', 250.0) # Hz (Reduziert für Performance, 60Hz reicht völlig)
         
         self.declare_parameter('base_frame', 'base_link') 
         self.declare_parameter('camera_frame', 'camera_color_frame') # camera_color_optical_frame
@@ -38,7 +40,7 @@ class FilterNode(Node):
         self.declare_parameter('camera_velocity_deadband_angular', 0.0)
         self.declare_parameter('camera_velocity_stale_timeout', 0.2)
         self.declare_parameter('proxy_corners_topic', '/ibvs/filter/proxy_corners')
-        self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
+        self.declare_parameter('image_topic', '/camera/camera/color/image_raw/compressed')
         
         # Debug Flag
         self.declare_parameter('debug', True)
@@ -75,6 +77,8 @@ class FilterNode(Node):
         # Caching für Debug-Visualisierung (da Update und Image nun asynchron sind)
         self.last_current_pixels = None
         self.last_desired_pixels = None
+        self.latest_bgr = None
+        self.latest_img_header = None
         
         # Letzter Twist aus /cmd_vel (angenommen im Kamera-Bezugssystem)
         self.pose_lock = threading.Lock()
@@ -111,14 +115,52 @@ class FilterNode(Node):
         self.sub_matches = self.create_subscription(Matches, '/ibvs/matches', self.matches_callback, 10, callback_group=self.cb_group)
         
         # 2. Debug Image (Event-basiert bei neuem Bild)
-        self.sub_image = self.create_subscription(Image, self.get_parameter('image_topic').value, self.image_callback, 10, callback_group=self.cb_group)
+        img_topic = self.get_parameter('image_topic').value
+        self.image_topic_uses_compressed = self._topic_uses_compressed(img_topic)
+        image_msg_type = CompressedImage if self.image_topic_uses_compressed else Image
+        self.sub_image = self.create_subscription(
+            image_msg_type,
+            img_topic,
+            self.image_callback,
+            qos_profile_sensor_data,
+            callback_group=self.cb_group,
+        )
 
         # 3. Predict Schritt (Zeit-basiert, fester Takt)
         self.timer = self.create_timer(1.0 / self.predict_rate, self.timer_callback, callback_group=self.cb_group)
 
         self.add_on_set_parameters_callback(self._on_parameters_changed)
 
-        self.get_logger().info(f"Filter Node gestartet. Modus: {self.filter_type}. Warte auf K-Matrix und Referenz...")
+        self.get_logger().info(
+            f"Filter Node gestartet. Modus: {self.filter_type}. "
+            f"Warte auf K-Matrix und Referenz..."
+        )
+        self.get_logger().info(
+            f"Sub image: {img_topic} "
+            f"({'compressed' if self.image_topic_uses_compressed else 'raw'})"
+        )
+
+    @staticmethod
+    def _topic_uses_compressed(topic: str) -> bool:
+        return topic.endswith('/compressed') or topic.endswith('/compressedDepth')
+
+    def _decode_color_bgr(self, msg: Any) -> np.ndarray:
+        if isinstance(msg, CompressedImage):
+            try:
+                bgr = self.cv_bridge.compressed_imgmsg_to_cv2(
+                    msg, desired_encoding='bgr8'
+                )
+            except Exception:
+                bgr = None
+            if bgr is None:
+                bgr = cv2.imdecode(
+                    np.frombuffer(bytes(msg.data), dtype=np.uint8),
+                    cv2.IMREAD_COLOR,
+                )
+            if bgr is None:
+                raise RuntimeError('compressed image decode returned None')
+            return bgr
+        return self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
 
     def cam_info_callback(self, msg: CameraInfo):
         if self.K is None:
@@ -364,9 +406,16 @@ class FilterNode(Node):
             with self.lock:
                 self.filter.update(current_pixels, desired_pixels)
 
-    def image_callback(self, img_msg: Image):
+    def image_callback(self, img_msg: Any):
         """3. Debug Schritt: Zeichnet Overlay, wenn ein Bild kommt."""
         if not self.debug_mode or self.filter is None:
+            return
+
+        try:
+            self.latest_bgr = self._decode_color_bgr(img_msg)
+            self.latest_img_header = img_msg.header
+        except Exception as e:
+            self.get_logger().warn(f"image convert failed: {e}")
             return
             
         # Wir nutzen die gecacheten Matches vom letzten Update-Schritt
@@ -375,14 +424,15 @@ class FilterNode(Node):
 
         if self.debug_mode:
             # self.get_logger().info(f"Filter status: {self.filter.status}")
-            self.publish_debug_image(img_msg, self.last_desired_pixels, self.last_current_pixels)
+            self.publish_debug_image(
+                self.latest_bgr,
+                self.latest_img_header,
+                self.last_desired_pixels,
+                self.last_current_pixels,
+            )
 
-    def publish_debug_image(self, img_msg, desired_pixels, current_pixels):
-        try:
-            cv_img = self.cv_bridge.imgmsg_to_cv2(img_msg, "bgr8")
-        except Exception as e:
-            self.get_logger().error(f"CV Bridge Fehler: {e}")
-            return
+    def publish_debug_image(self, bgr_img, img_header, desired_pixels, current_pixels):
+        cv_img = bgr_img.copy()
 
         # Filter-Infos holen (Thread-Safe)
         with self.lock:
@@ -492,7 +542,11 @@ class FilterNode(Node):
 
         # Publishen
         debug_msg = self.cv_bridge.cv2_to_imgmsg(cv_img, "bgr8")
-        debug_msg.header = img_msg.header
+        if img_header is not None:
+            debug_msg.header = img_header
+        else:
+            debug_msg.header.stamp = self.get_clock().now().to_msg()
+            debug_msg.header.frame_id = self.camera_frame
         self.pub_debug_img.publish(debug_msg)
 
 
