@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import rclpy
+import struct
 from cv_bridge import CvBridge
 from ibvs_msgs.msg import Keypoints
 from rclpy.node import Node
@@ -11,7 +12,8 @@ from rclpy.qos import (
     ReliabilityPolicy,
     qos_profile_sensor_data,
 )
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
+from typing import Any
 
 from ibvs_perception.detectors import create_detector
 
@@ -21,8 +23,8 @@ class KeypointNode(Node):
         super().__init__('keypoint_node')
 
         # Topics
-        self.declare_parameter('input_topic', '/camera/camera/color/image_raw')
-        self.declare_parameter('depth_topic', '/camera/camera/aligned_depth_to_color/image_raw')
+        self.declare_parameter('input_topic', '/camera/camera/color/image_raw/compressed')
+        self.declare_parameter('depth_topic', '/camera/camera/aligned_depth_to_color/image_raw/compressedDepth')
         self.declare_parameter('keypoints_topic', '/ibvs/keypoints')
 
         # Debug topics
@@ -87,8 +89,16 @@ class KeypointNode(Node):
         )
 
         self.kp_pub = self.create_publisher(Keypoints, kp_topic, 10)
-        self.sub_color = self.create_subscription(Image, in_topic, self.on_color, qos_profile_sensor_data)
-        self.sub_depth = self.create_subscription(Image, depth_topic, self.on_depth, qos_profile_sensor_data)
+        self.color_topic_uses_compressed = self._topic_uses_compressed(in_topic)
+        self.depth_topic_uses_compressed = self._topic_uses_compressed(depth_topic)
+        color_msg_type = CompressedImage if self.color_topic_uses_compressed else Image
+        depth_msg_type = CompressedImage if self.depth_topic_uses_compressed else Image
+        self.sub_color = self.create_subscription(
+            color_msg_type, in_topic, self.on_color, qos_profile_sensor_data
+        )
+        self.sub_depth = self.create_subscription(
+            depth_msg_type, depth_topic, self.on_depth, qos_profile_sensor_data
+        )
 
         self.debug_pub = None
         self.binary_pub = None
@@ -96,14 +106,81 @@ class KeypointNode(Node):
             self.debug_pub = self.create_publisher(Image, out_topic, pub_qos)
             self.binary_pub = self.create_publisher(Image, bin_topic, pub_qos)
 
-        self.get_logger().info(f'Subscribing color: {in_topic}')
-        self.get_logger().info(f'Subscribing depth: {depth_topic}')
+        self.get_logger().info(
+            f"Subscribing color: {in_topic} "
+            f"({'compressed' if self.color_topic_uses_compressed else 'raw'})"
+        )
+        self.get_logger().info(
+            f"Subscribing depth: {depth_topic} "
+            f"({'compressed' if self.depth_topic_uses_compressed else 'raw'})"
+        )
         self.get_logger().info(f'Publishing keypoints: {kp_topic}')
         if self.debug_mode:
             self.get_logger().info(f'Publishing debug overlay: {out_topic}')
             self.get_logger().info(f'Publishing near-mask:     {bin_topic}')
         else:
             self.get_logger().info('Debug mode disabled.')
+
+    @staticmethod
+    def _topic_uses_compressed(topic: str) -> bool:
+        return topic.endswith('/compressed') or topic.endswith('/compressedDepth')
+
+    @staticmethod
+    def _decode_compressed_depth_payload(msg: CompressedImage) -> np.ndarray:
+        fmt = str(msg.format).lower()
+        raw = bytes(msg.data)
+
+        if len(raw) > 12:
+            payload = np.frombuffer(raw[12:], dtype=np.uint8)
+            depth_img = cv2.imdecode(payload, cv2.IMREAD_UNCHANGED)
+            if depth_img is not None:
+                if fmt.startswith('32fc1'):
+                    depth_quant_a, depth_quant_b = struct.unpack('<ff', raw[4:12])
+                    inv_depth = depth_img.astype(np.float32)
+                    depth = np.zeros(inv_depth.shape, dtype=np.float32)
+                    valid = inv_depth > 0.0
+                    depth[valid] = depth_quant_a / (inv_depth[valid] - depth_quant_b)
+                    depth[~np.isfinite(depth)] = 0.0
+                    return depth
+                return depth_img
+
+        # Fallback for plain `/compressed` depth topics that do not carry the depth header.
+        depth_img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if depth_img is None:
+            raise RuntimeError('failed to decode compressed depth payload')
+        return depth_img
+
+    def _decode_depth(self, msg: Any) -> np.ndarray:
+        if isinstance(msg, CompressedImage):
+            try:
+                depth_img = self.bridge.compressed_imgmsg_to_cv2(
+                    msg, desired_encoding='passthrough'
+                )
+                if depth_img is not None:
+                    return depth_img
+            except Exception:
+                pass
+
+            try:
+                return self._decode_compressed_depth_payload(msg)
+            except Exception as e:
+                raise RuntimeError(
+                    f'compressed depth decode failed for format={msg.format}'
+                ) from e
+        return self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+
+    def _decode_color_bgr(self, msg: Any) -> np.ndarray:
+        if isinstance(msg, CompressedImage):
+            try:
+                bgr = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            except Exception:
+                bgr = None
+            if bgr is None:
+                bgr = cv2.imdecode(np.frombuffer(bytes(msg.data), dtype=np.uint8), cv2.IMREAD_COLOR)
+            if bgr is None:
+                raise RuntimeError('compressed color decode returned None')
+            return bgr
+        return self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
 
     def _make_near_mask(self, depth_raw: np.ndarray) -> np.ndarray | None:
         if depth_raw.ndim != 2:
@@ -157,9 +234,12 @@ class KeypointNode(Node):
         # to suppress static robot-base regions once calibration is available.
         return near_mask
 
-    def on_depth(self, msg: Image):
+    def on_depth(self, msg: Any):
         try:
-            depth_raw = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            if not bool(self.get_parameter('use_depth_roi').value):
+                self.latest_near_mask = None
+                return
+            depth_raw = self._decode_depth(msg)
             self.latest_near_mask = self._make_near_mask(depth_raw)
         except Exception as e:
             self.latest_near_mask = None
@@ -193,9 +273,10 @@ class KeypointNode(Node):
         scores_out = scores[keep] if scores is not None else None
         return kpts_out, desc_out, scores_out, keep
 
-    def on_color(self, msg: Image):
+    def on_color(self, msg: Any):
         try:
-            bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            self.use_depth_roi = bool(self.get_parameter('use_depth_roi').value)
+            bgr = self._decode_color_bgr(msg)
             gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
             res = self.det.detect_and_compute(gray)

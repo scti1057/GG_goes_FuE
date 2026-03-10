@@ -2,10 +2,11 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
+from typing import Any
 
 from ibvs_msgs.msg import Matches
 
@@ -13,7 +14,7 @@ class MatchesVizNode(Node):
     def __init__(self):
         super().__init__('matches_viz_node')
 
-        self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
+        self.declare_parameter('image_topic', '/camera/camera/color/image_raw/compressed')
         self.declare_parameter('matches_topic', '/ibvs/matches')
         self.declare_parameter('output_topic', '/ibvs/debug/matches_image')
         self.declare_parameter('miss_max', 10)
@@ -29,7 +30,10 @@ class MatchesVizNode(Node):
         m_topic = self.get_parameter('matches_topic').value
         out_topic = self.get_parameter('output_topic').value
 
-        self.sub_img = self.create_subscription(Image, img_topic, self.on_image, qos_profile_sensor_data)
+        self.image_topic_uses_compressed = self._topic_uses_compressed(img_topic)
+        image_msg_type = CompressedImage if self.image_topic_uses_compressed else Image
+
+        self.sub_img = self.create_subscription(image_msg_type, img_topic, self.on_image, qos_profile_sensor_data)
         self.sub_m = self.create_subscription(Matches, m_topic, self.on_matches, qos_profile_sensor_data)
 
         pub_qos = QoSProfile(
@@ -40,16 +44,36 @@ class MatchesVizNode(Node):
         )
         self.pub = self.create_publisher(Image, out_topic, pub_qos)
 
-        self.get_logger().info(f"Sub image:   {img_topic}")
+        self.get_logger().info(
+            f"Sub image:   {img_topic} "
+            f"({'compressed' if self.image_topic_uses_compressed else 'raw'})"
+        )
         self.get_logger().info(f"Sub matches: {m_topic}")
         self.get_logger().info(f"Pub overlay: {out_topic}")
+
+    @staticmethod
+    def _topic_uses_compressed(topic: str) -> bool:
+        return topic.endswith('/compressed') or topic.endswith('/compressedDepth')
+
+    def _decode_color_bgr(self, msg: Any) -> np.ndarray:
+        if isinstance(msg, CompressedImage):
+            try:
+                bgr = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            except Exception:
+                bgr = None
+            if bgr is None:
+                bgr = cv2.imdecode(np.frombuffer(bytes(msg.data), dtype=np.uint8), cv2.IMREAD_COLOR)
+            if bgr is None:
+                raise RuntimeError('compressed image decode returned None')
+            return bgr
+        return self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
 
     def on_matches(self, msg: Matches):
         self.last_matches = msg
 
-    def on_image(self, msg: Image):
+    def on_image(self, msg: Any):
         try:
-            bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            bgr = self._decode_color_bgr(msg)
         except Exception as e:
             self.get_logger().warn(f"img convert failed: {e}")
             return

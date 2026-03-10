@@ -1,0 +1,3 @@
+case,scenario,source,sweep_case,depth_topic_used,avg_color_fps,avg_depth_fps,dropped_color_frames_est,dropped_depth_frames_est,capture_timeouts,fps_first20_avg,fps_last20_avg,fps_drift_pct_first20_to_last20
+rgb,rgb,ros,,,16.782349029540956,,4610,,40,54.571140086956525,6.5602421600000005,-87.9785502931649
+rgbd,rgbd,ros,,,57.778529551300544,56.645290436939874,210,347,0,57.23325173913044,57.900882375,1.1665083069412676

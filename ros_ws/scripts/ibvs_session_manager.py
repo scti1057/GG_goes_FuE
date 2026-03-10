@@ -222,6 +222,138 @@ class IbvsSessionManager:
             stopped = self.processes[name].stop()
             print(f"  - {name}: {'gestoppt' if stopped else 'war bereits aus'}")
 
+    @staticmethod
+    def _parse_ros_bool_param_get(output: str) -> Optional[bool]:
+        out = output.strip().lower()
+        # Typical format: "Boolean value is: True"
+        m = re.search(r"boolean value is:\s*(true|false)", out)
+        if m:
+            return m.group(1) == "true"
+        # Fallback: plain true/false in output
+        if re.search(r"\btrue\b", out):
+            return True
+        if re.search(r"\bfalse\b", out):
+            return False
+        return None
+
+    def _set_node_param_bool(
+        self,
+        node_name: str,
+        param_name: str,
+        target_value: bool,
+        retries: int,
+        timeout: float,
+        retry_wait: float,
+    ) -> bool:
+        value_str = "true" if target_value else "false"
+        retries = max(1, int(retries))
+
+        for attempt in range(1, retries + 1):
+            cmd_set = [
+                "ros2",
+                "param",
+                "set",
+                node_name,
+                param_name,
+                value_str,
+            ]
+            rc_set, out_set = run_cmd(cmd_set, timeout_sec=timeout)
+            if rc_set == 0:
+                cmd_get = ["ros2", "param", "get", node_name, param_name]
+                rc_get, out_get = run_cmd(cmd_get, timeout_sec=timeout)
+                if rc_get == 0:
+                    got = self._parse_ros_bool_param_get(out_get)
+                    if got is None:
+                        print(
+                            f"  - WARN {node_name}.{param_name}: gesetzt, aber Rückleseformat unbekannt. "
+                            "Akzeptiere als erfolgreich."
+                        )
+                        return True
+                    if got == target_value:
+                        return True
+                    print(
+                        f"  - WARN {node_name}.{param_name}: Rücklese-Wert={got}, "
+                        f"erwartet={target_value} (Versuch {attempt}/{retries})"
+                    )
+                else:
+                    print(
+                        f"  - WARN {node_name}.{param_name}: set ok, get fehlgeschlagen "
+                        f"(Versuch {attempt}/{retries})"
+                    )
+            else:
+                short = out_set.splitlines()[-1] if out_set else "(kein output)"
+                print(
+                    f"  - WARN {node_name}.{param_name}: set fehlgeschlagen "
+                    f"(Versuch {attempt}/{retries}) -> {short}"
+                )
+
+            if attempt < retries and retry_wait > 0.0:
+                time.sleep(retry_wait)
+
+        return False
+
+    def _set_camera_param_bool(self, param_name: str, target_value: bool) -> bool:
+        return self._set_node_param_bool(
+            node_name=self.args.camera_node,
+            param_name=param_name,
+            target_value=target_value,
+            retries=int(self.args.camera_param_retries),
+            timeout=float(self.args.camera_param_timeout),
+            retry_wait=float(self.args.camera_param_retry_wait),
+        )
+
+    def set_camera_processing_mode(self, mode_name: str, enabled: bool) -> bool:
+        target = {
+            "align_depth.enable": enabled,
+            "spatial_filter.enable": enabled,
+            "temporal_filter.enable": enabled,
+            "hole_filling_filter.enable": enabled,
+        }
+        print(
+            f"\n[camera] Setze Modus '{mode_name}' auf Node {self.args.camera_node}: "
+            f"align/spatial/temporal/hole_filling = {enabled}"
+        )
+
+        all_ok = True
+        for name, val in target.items():
+            ok = self._set_camera_param_bool(name, val)
+            print(f"  - {name}: {'ok' if ok else 'FEHLER'}")
+            all_ok = all_ok and ok
+
+        if all_ok and self.args.camera_param_settle > 0.0:
+            time.sleep(float(self.args.camera_param_settle))
+
+        if not all_ok:
+            print(
+                "[camera] Konnte nicht alle Kamera-Parameter setzen. "
+                "Aktion wird aus Sicherheitsgründen abgebrochen."
+            )
+        return all_ok
+
+    def set_keypoint_depth_roi_mode(self, enabled: bool) -> bool:
+        print(
+            f"\n[keypoint] Setze {self.args.keypoint_node}.use_depth_roi = {enabled}"
+        )
+        ok = self._set_node_param_bool(
+            node_name=self.args.keypoint_node,
+            param_name="use_depth_roi",
+            target_value=enabled,
+            retries=int(self.args.keypoint_param_retries),
+            timeout=float(self.args.keypoint_param_timeout),
+            retry_wait=float(self.args.keypoint_param_retry_wait),
+        )
+        print(f"  - use_depth_roi: {'ok' if ok else 'FEHLER'}")
+
+        if ok and self.args.keypoint_param_settle > 0.0:
+            time.sleep(float(self.args.keypoint_param_settle))
+
+        if not ok:
+            print(
+                "[keypoint] Konnte use_depth_roi nicht setzen. "
+                "Aktion wird aus Sicherheitsgründen abgebrochen."
+            )
+        return ok
+
     def start_tracking(self) -> None:
         init_done = self.read_init_done()
         if init_done is not True:
@@ -231,6 +363,13 @@ class IbvsSessionManager:
         if not self._is_core_running():
             print("\n[tracking] Core läuft nicht, starte zuerst core nodes.")
             self.start_core()
+            time.sleep(1.0)
+
+        # Tracking mode: maximize RGB throughput
+        if not self.set_camera_processing_mode("tracking", enabled=False):
+            return
+        if not self.set_keypoint_depth_roi_mode(enabled=False):
+            return
 
         print("\n[tracking] Starte descriptor_matcher + matches_viz ...")
         for name in ("descriptor_matcher", "matches_viz"):
@@ -256,6 +395,12 @@ class IbvsSessionManager:
             print("\n[init] Core läuft nicht, starte core nodes.")
             self.start_core()
             time.sleep(1.0)
+
+        # Initialization mode: use full depth processing chain
+        if not self.set_camera_processing_mode("initialization", enabled=True):
+            return
+        if not self.set_keypoint_depth_roi_mode(enabled=True):
+            return
 
         ok, message, raw = self.call_start_capture_service()
         if not ok:
@@ -403,8 +548,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=1024)
     parser.add_argument("--xfeat-repo-dir", default="", help="Optional override for xfeat repo path.")
 
-    parser.add_argument("--input-topic", default="/camera/camera/color/image_raw")
-    parser.add_argument("--depth-topic", default="/camera/camera/aligned_depth_to_color/image_raw")
+    parser.add_argument("--input-topic", default="/camera/camera/color/image_raw/compressed")
+    parser.add_argument("--depth-topic", default="/camera/camera/aligned_depth_to_color/image_raw/compressedDepth")
     parser.add_argument("--keypoints-topic", default="/ibvs/keypoints")
     parser.add_argument("--reference-topic", default="/ibvs/reference/keypoints")
     parser.add_argument("--matches-topic", default="/ibvs/matches")
@@ -420,6 +565,18 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--match-threshold", type=float, default=0.85)
     parser.add_argument("--mutual-check", action=argparse.BooleanOptionalAction, default=True)
+
+    parser.add_argument("--camera-node", default="/camera/camera")
+    parser.add_argument("--camera-param-timeout", type=float, default=6.0)
+    parser.add_argument("--camera-param-retries", type=int, default=3)
+    parser.add_argument("--camera-param-retry-wait", type=float, default=0.75)
+    parser.add_argument("--camera-param-settle", type=float, default=1.0)
+
+    parser.add_argument("--keypoint-node", default="/keypoint_node")
+    parser.add_argument("--keypoint-param-timeout", type=float, default=6.0)
+    parser.add_argument("--keypoint-param-retries", type=int, default=3)
+    parser.add_argument("--keypoint-param-retry-wait", type=float, default=0.5)
+    parser.add_argument("--keypoint-param-settle", type=float, default=0.25)
     return parser.parse_args()
 
 

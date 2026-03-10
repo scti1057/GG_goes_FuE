@@ -25,7 +25,11 @@ RUN chown -R $USERNAME:$USERNAME $WORKDIR
 # Install prerequisites
 RUN sudo apt-get update && apt-get install -y git wget \
     g++ \
-    ros-${ROS_DISTRO}-librealsense2* python3-rosdep
+    ros-${ROS_DISTRO}-librealsense2* \
+    ros-${ROS_DISTRO}-image-transport-plugins \
+    ros-${ROS_DISTRO}-compressed-image-transport \
+    ros-${ROS_DISTRO}-compressed-depth-image-transport \
+    python3-rosdep
 
 # Switch to non-root user
 USER $USERNAME

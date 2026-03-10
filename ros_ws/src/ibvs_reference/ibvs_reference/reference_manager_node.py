@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import cv2
@@ -11,7 +11,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 
 from std_srvs.srv import Trigger
 from std_msgs.msg import Bool, Header
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
 from cv_bridge import CvBridge
 
 from ibvs_msgs.msg import Keypoints
@@ -40,7 +40,7 @@ class ReferenceManagerNode(Node):
 
         # Params
         self.declare_parameter('keypoints_topic', '/ibvs/keypoints')
-        self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
+        self.declare_parameter('image_topic', '/camera/camera/color/image_raw/compressed')
 
         self.declare_parameter('init_duration_sec', 5.0)
         self.declare_parameter('ref_top_k', 300)
@@ -90,8 +90,10 @@ class ReferenceManagerNode(Node):
         # Subscribers
         kp_topic = self.get_parameter('keypoints_topic').value
         img_topic = self.get_parameter('image_topic').value
+        self.image_topic_uses_compressed = self._topic_uses_compressed(img_topic)
+        image_msg_type = CompressedImage if self.image_topic_uses_compressed else Image
         self.kp_sub = self.create_subscription(Keypoints, kp_topic, self.on_keypoints, qos_profile_sensor_data)
-        self.img_sub = self.create_subscription(Image, img_topic, self.on_image, qos_profile_sensor_data)
+        self.img_sub = self.create_subscription(image_msg_type, img_topic, self.on_image, qos_profile_sensor_data)
 
         # Service
         self.srv = self.create_service(Trigger, '/ibvs/reference/start_capture', self.on_start_capture)
@@ -100,18 +102,38 @@ class ReferenceManagerNode(Node):
         self.timer = self.create_timer(0.05, self.on_timer)
 
         self.publish_init_done(False)
-        self.get_logger().info(f"Ready. keypoints_topic={kp_topic} image_topic={img_topic}")
+        self.get_logger().info(
+            f"Ready. keypoints_topic={kp_topic} image_topic={img_topic} "
+            f"({'compressed' if self.image_topic_uses_compressed else 'raw'})"
+        )
         if self.debug_pub is not None:
             self.get_logger().info(f"Debug overlay topic={self.get_parameter('debug_topic').value}")
+
+    @staticmethod
+    def _topic_uses_compressed(topic: str) -> bool:
+        return topic.endswith('/compressed') or topic.endswith('/compressedDepth')
+
+    def _decode_color_bgr(self, msg: Any) -> np.ndarray:
+        if isinstance(msg, CompressedImage):
+            try:
+                bgr = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            except Exception:
+                bgr = None
+            if bgr is None:
+                bgr = cv2.imdecode(np.frombuffer(bytes(msg.data), dtype=np.uint8), cv2.IMREAD_COLOR)
+            if bgr is None:
+                raise RuntimeError('compressed image decode returned None')
+            return bgr
+        return self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
 
     def publish_init_done(self, v: bool):
         msg = Bool()
         msg.data = bool(v)
         self.init_done_pub.publish(msg)
 
-    def on_image(self, msg: Image):
+    def on_image(self, msg: Any):
         try:
-            self.latest_bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            self.latest_bgr = self._decode_color_bgr(msg)
             self.latest_img_header = msg.header
         except Exception as e:
             self.get_logger().warn(f"image convert failed: {e}")

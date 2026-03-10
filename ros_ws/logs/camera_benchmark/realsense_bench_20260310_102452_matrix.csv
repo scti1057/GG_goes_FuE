@@ -1,0 +1,6 @@
+case,scenario,source,sweep_case,depth_topic_used,avg_color_fps,avg_depth_fps,dropped_color_frames_est,dropped_depth_frames_est,capture_timeouts,fps_first20_avg,fps_last20_avg,fps_drift_pct_first20_to_last20
+baseline,rgbd__baseline,ros,baseline,/camera/camera/aligned_depth_to_color/image_raw,57.92883661912075,46.596382965207596,24,194,0,57.07109,57.261768499999995,0.3341069883192998
+align_off,rgbd__align_off,ros,align_off,/camera/camera/depth/image_rect_raw,58.33107572605186,50.464713513852864,18,137,0,59.579124500000006,57.782124249999995,-3.016157530142979
+spatial_off,rgbd__spatial_off,ros,spatial_off,/camera/camera/aligned_depth_to_color/image_raw,58.328715810522915,48.729475722848285,19,162,0,59.0781475,59.01889274999999,-0.10029893032784756
+temporal_off,rgbd__temporal_off,ros,temporal_off,/camera/camera/aligned_depth_to_color/image_raw,57.67067041663913,49.2131933463006,28,153,0,57.071560500000004,58.53889833333333,2.571049083778469
+hole_filling_off,rgbd__hole_filling_off,ros,hole_filling_off,/camera/camera/aligned_depth_to_color/image_raw,58.396954937507005,48.59746592402124,17,164,0,58.077908,57.530969,-0.9417333007242648

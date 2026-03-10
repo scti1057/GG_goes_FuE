@@ -64,12 +64,180 @@ def args_to_json_dict(args: argparse.Namespace) -> Dict[str, Any]:
     return out
 
 
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def fps_to_rgb(fps: float, target_fps: float) -> Tuple[int, int, int]:
+    if target_fps <= 0.0:
+        target_fps = 60.0
+    ratio = clamp(fps / target_fps, 0.0, 1.0)
+    # 0.0 -> red, 0.5 -> yellow, 1.0 -> green
+    if ratio <= 0.5:
+        t = ratio / 0.5
+        r = 255
+        g = int(255 * t)
+        b = 0
+    else:
+        t = (ratio - 0.5) / 0.5
+        r = int(255 * (1.0 - t))
+        g = 255
+        b = 0
+    return r, g, b
+
+
+def colorize_fps(
+    fps_value: Optional[float],
+    target_fps: float,
+    use_color: bool,
+    width: int = 7,
+) -> str:
+    if fps_value is None:
+        return "-".rjust(width)
+    text = f"{fps_value:6.2f}"
+    if not use_color:
+        return text.rjust(width)
+    r, g, b = fps_to_rgb(fps_value, target_fps)
+    # Use dark text on bright background for readability.
+    return f"\x1b[48;2;{r};{g};{b}m\x1b[38;2;20;20;20m{text}\x1b[0m"
+
+
+def _short_case_name(summary: Dict[str, Any]) -> str:
+    if "sweep_case" in summary:
+        return str(summary["sweep_case"])
+    scenario = str(summary.get("scenario", ""))
+    if "__" in scenario:
+        return scenario.split("__", 1)[1]
+    return scenario
+
+
+def print_performance_matrix(
+    summaries: List[Dict[str, Any]],
+    target_fps: float,
+    use_color: bool,
+) -> None:
+    if not summaries:
+        return
+
+    headers = [
+        "Case",
+        "Source",
+        "AvgColor",
+        "AvgDepth",
+        "DropColor",
+        "DropDepth",
+        "Timeouts",
+    ]
+    rows: List[List[str]] = []
+    for s in summaries:
+        stats = s.get("stats", {})
+        avg_color = stats.get("avg_color_fps")
+        avg_depth = stats.get("avg_depth_fps")
+        drop_color = stats.get("dropped_color_frames_est")
+        drop_depth = stats.get("dropped_depth_frames_est")
+        timeouts = stats.get("capture_timeouts")
+        rows.append(
+            [
+                _short_case_name(s),
+                str(s.get("source", "")),
+                colorize_fps(avg_color, target_fps, use_color),
+                colorize_fps(avg_depth, target_fps, use_color),
+                str(drop_color if drop_color is not None else "-"),
+                str(drop_depth if drop_depth is not None else "-"),
+                str(timeouts if timeouts is not None else "-"),
+            ]
+        )
+
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            # ANSI sequences do not add visual width; keep width based on plain fallback lengths.
+            plain = cell
+            if "\x1b[" in cell:
+                plain = " 00.00 "
+            col_widths[i] = max(col_widths[i], len(plain))
+
+    def fmt_cell(i: int, value: str) -> str:
+        if i in (2, 3):  # colored fps columns
+            return value.rjust(col_widths[i])
+        return value.ljust(col_widths[i])
+
+    sep = " | "
+    header_line = sep.join(h.ljust(col_widths[i]) for i, h in enumerate(headers))
+    divider = "-+-".join("-" * col_widths[i] for i in range(len(headers)))
+
+    print("\nPerformance Matrix (target FPS: {:.1f})".format(target_fps), flush=True)
+    print(header_line, flush=True)
+    print(divider, flush=True)
+    for row in rows:
+        print(sep.join(fmt_cell(i, c) for i, c in enumerate(row)), flush=True)
+
+
+def write_performance_matrix_csv(
+    summaries: List[Dict[str, Any]],
+    output_path: Path,
+) -> None:
+    with output_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "case",
+                "scenario",
+                "source",
+                "sweep_case",
+                "depth_topic_used",
+                "avg_color_fps",
+                "avg_depth_fps",
+                "dropped_color_frames_est",
+                "dropped_depth_frames_est",
+                "capture_timeouts",
+                "fps_first20_avg",
+                "fps_last20_avg",
+                "fps_drift_pct_first20_to_last20",
+            ],
+        )
+        writer.writeheader()
+        for s in summaries:
+            stats = s.get("stats", {})
+            writer.writerow(
+                {
+                    "case": _short_case_name(s),
+                    "scenario": s.get("scenario", ""),
+                    "source": s.get("source", ""),
+                    "sweep_case": s.get("sweep_case", ""),
+                    "depth_topic_used": s.get("depth_topic_used", ""),
+                    "avg_color_fps": stats.get("avg_color_fps", ""),
+                    "avg_depth_fps": stats.get("avg_depth_fps", ""),
+                    "dropped_color_frames_est": stats.get("dropped_color_frames_est", ""),
+                    "dropped_depth_frames_est": stats.get("dropped_depth_frames_est", ""),
+                    "capture_timeouts": stats.get("capture_timeouts", ""),
+                    "fps_first20_avg": stats.get("fps_first20_avg", ""),
+                    "fps_last20_avg": stats.get("fps_last20_avg", ""),
+                    "fps_drift_pct_first20_to_last20": stats.get(
+                        "fps_drift_pct_first20_to_last20", ""
+                    ),
+                }
+            )
+
+
 def scenarios_from_args(args: argparse.Namespace) -> List[str]:
     if args.mode == "both":
         if args.both_order == "rgb-rgbd":
             return ["rgb", "rgbd"]
         return ["rgbd", "rgb"]
     return [args.mode]
+
+
+def ros_image_topic_transport(topic: str) -> str:
+    if topic.endswith("/compressedDepth"):
+        return "compressedDepth"
+    if topic.endswith("/compressed"):
+        return "compressed"
+    return "raw"
+
+
+def ros_topic_uses_compressed_msg(topic: str) -> bool:
+    return ros_image_topic_transport(topic) in ("compressed", "compressedDepth")
 
 
 def safe_device_info(device: Any, camera_info_key: Any) -> Optional[str]:
@@ -225,7 +393,7 @@ def collect_scenario_direct(
     frame_writer: Optional[csv.DictWriter],
     frame_file,
 ) -> Dict[str, Any]:
-    enable_depth = scenario == "rgbd"
+    enable_depth = scenario.startswith("rgbd")
     pipeline = rs.pipeline()
     config = rs.config()
 
@@ -566,7 +734,7 @@ def probe_ros_color_topic(args: argparse.Namespace) -> bool:
     try:
         import rclpy
         from rclpy.qos import qos_profile_sensor_data
-        from sensor_msgs.msg import Image
+        from sensor_msgs.msg import CompressedImage, Image
     except ImportError:
         return False
 
@@ -578,8 +746,13 @@ def probe_ros_color_topic(args: argparse.Namespace) -> bool:
     def on_color(_msg: Any) -> None:
         got_msg["value"] = True
 
+    color_msg_type = (
+        CompressedImage
+        if ros_topic_uses_compressed_msg(args.ros_color_topic)
+        else Image
+    )
     sub = node.create_subscription(
-        Image, args.ros_color_topic, on_color, qos_profile_sensor_data
+        color_msg_type, args.ros_color_topic, on_color, qos_profile_sensor_data
     )
 
     deadline = time.monotonic() + args.ros_probe_timeout_sec
@@ -606,14 +779,22 @@ def collect_scenario_ros(
         from rclpy.callback_groups import ReentrantCallbackGroup
         from rclpy.executors import MultiThreadedExecutor
         from rclpy.qos import qos_profile_sensor_data
-        from sensor_msgs.msg import Image
+        from sensor_msgs.msg import CompressedImage, Image
     except ImportError as exc:
         raise RuntimeError(
             "ROS mode requested but rclpy/sensor_msgs are unavailable in this environment."
         ) from exc
 
-    enable_depth = scenario == "rgbd"
+    enable_depth = scenario.startswith("rgbd")
     expected_dt = 1.0 / args.fps if args.fps > 0 else None
+    color_transport = ros_image_topic_transport(args.ros_color_topic)
+    depth_transport = ros_image_topic_transport(args.ros_depth_topic) if enable_depth else None
+    color_msg_is_compressed = ros_topic_uses_compressed_msg(args.ros_color_topic)
+    depth_msg_is_compressed = (
+        ros_topic_uses_compressed_msg(args.ros_depth_topic) if enable_depth else False
+    )
+    color_msg_type = CompressedImage if color_msg_is_compressed else Image
+    depth_msg_type = CompressedImage if depth_msg_is_compressed else Image
 
     if not rclpy.ok():
         rclpy.init(args=None)
@@ -711,9 +892,13 @@ def collect_scenario_ros(
                 "msg_stamp_ns": int(stamp_sec * 1e9),
                 "color_timestamp_ms": "",
                 "timestamp_domain": "ROS_TIME",
-                "width": int(msg.width),
-                "height": int(msg.height),
-                "encoding": msg.encoding,
+                "width": "" if color_msg_is_compressed else int(msg.width),
+                "height": "" if color_msg_is_compressed else int(msg.height),
+                "encoding": (
+                    str(getattr(msg, "format", "compressed"))
+                    if color_msg_is_compressed
+                    else msg.encoding
+                ),
                 "depth_present": "",
                 "sensor_timestamp_ms": "",
                 "backend_timestamp_ms": "",
@@ -766,9 +951,13 @@ def collect_scenario_ros(
                 "msg_stamp_ns": int(stamp_sec * 1e9),
                 "color_timestamp_ms": "",
                 "timestamp_domain": "ROS_TIME",
-                "width": int(msg.width),
-                "height": int(msg.height),
-                "encoding": msg.encoding,
+                "width": "" if depth_msg_is_compressed else int(msg.width),
+                "height": "" if depth_msg_is_compressed else int(msg.height),
+                "encoding": (
+                    str(getattr(msg, "format", "compressed"))
+                    if depth_msg_is_compressed
+                    else msg.encoding
+                ),
                 "depth_present": 1,
                 "sensor_timestamp_ms": "",
                 "backend_timestamp_ms": "",
@@ -778,7 +967,7 @@ def collect_scenario_ros(
         )
 
     sub_color = node.create_subscription(
-        Image,
+        color_msg_type,
         args.ros_color_topic,
         on_color,
         qos_profile_sensor_data,
@@ -787,7 +976,7 @@ def collect_scenario_ros(
     sub_depth = None
     if enable_depth:
         sub_depth = node.create_subscription(
-            Image,
+            depth_msg_type,
             args.ros_depth_topic,
             on_depth,
             qos_profile_sensor_data,
@@ -796,8 +985,12 @@ def collect_scenario_ros(
 
     try:
         print(
-            f"[ros/{scenario}] start: color={args.ros_color_topic} "
-            + (f"depth={args.ros_depth_topic}" if enable_depth else "depth=off"),
+            f"[ros/{scenario}] start: color={args.ros_color_topic} ({color_transport}) "
+            + (
+                f"depth={args.ros_depth_topic} ({depth_transport})"
+                if enable_depth
+                else "depth=off"
+            ),
             flush=True,
         )
 
@@ -983,7 +1176,9 @@ def collect_scenario_ros(
                 "duration_sec": args.duration_sec,
                 "warmup_sec": 0.0 if args.skip_warmup else args.warmup_sec,
                 "color_topic": args.ros_color_topic,
+                "color_transport": color_transport,
                 "depth_topic": args.ros_depth_topic if enable_depth else None,
+                "depth_transport": depth_transport if enable_depth else None,
             },
             "camera_info": None,
             "active_streams": None,
@@ -1079,6 +1274,308 @@ def detect_source(args: argparse.Namespace) -> Tuple[str, str]:
     return "direct", f"no messages on {args.ros_color_topic}"
 
 
+def _normalize_node_name(name: str) -> str:
+    n = name.strip()
+    if not n:
+        return n
+    if not n.startswith("/"):
+        n = "/" + n
+    return n
+
+
+def _parameter_value_to_python(value_msg: Any, parameter_type: Any) -> Any:
+    if value_msg.type == parameter_type.PARAMETER_BOOL:
+        return bool(value_msg.bool_value)
+    if value_msg.type == parameter_type.PARAMETER_INTEGER:
+        return int(value_msg.integer_value)
+    if value_msg.type == parameter_type.PARAMETER_DOUBLE:
+        return float(value_msg.double_value)
+    if value_msg.type == parameter_type.PARAMETER_STRING:
+        return str(value_msg.string_value)
+    if value_msg.type == parameter_type.PARAMETER_BYTE_ARRAY:
+        return list(value_msg.byte_array_value)
+    if value_msg.type == parameter_type.PARAMETER_BOOL_ARRAY:
+        return list(value_msg.bool_array_value)
+    if value_msg.type == parameter_type.PARAMETER_INTEGER_ARRAY:
+        return list(value_msg.integer_array_value)
+    if value_msg.type == parameter_type.PARAMETER_DOUBLE_ARRAY:
+        return list(value_msg.double_array_value)
+    if value_msg.type == parameter_type.PARAMETER_STRING_ARRAY:
+        return list(value_msg.string_array_value)
+    return None
+
+
+def resolve_ros_camera_node(requested_node: str, timeout_sec: float) -> str:
+    if requested_node.strip():
+        return _normalize_node_name(requested_node)
+
+    try:
+        import rclpy
+    except ImportError as exc:
+        raise RuntimeError("rclpy is required to auto-discover camera node.") from exc
+
+    started_here = False
+    if not rclpy.ok():
+        rclpy.init(args=None)
+        started_here = True
+
+    node_name = f"rs_bench_node_discovery_{int(time.time() * 1000) % 1000000}"
+    node = rclpy.create_node(node_name)
+    try:
+        deadline = time.monotonic() + max(0.2, timeout_sec)
+        candidates: List[str] = []
+        while time.monotonic() < deadline:
+            names = node.get_node_names_and_namespaces()
+            candidates = []
+            for name, ns in names:
+                if ns == "/":
+                    full = f"/{name}"
+                else:
+                    full = f"{ns}/{name}"
+                full = full.replace("//", "/")
+                candidates.append(full)
+            if candidates:
+                break
+            rclpy.spin_once(node, timeout_sec=0.05)
+
+        preferred = "/camera/camera"
+        if preferred in candidates:
+            return preferred
+
+        for full in candidates:
+            if full.endswith("/camera"):
+                return full
+
+        if candidates:
+            raise RuntimeError(
+                "Could not auto-detect RealSense camera node. "
+                f"Discovered nodes include: {', '.join(sorted(candidates)[:10])}. "
+                "Pass --ros-camera-node explicitly."
+            )
+        raise RuntimeError("No ROS nodes discovered while trying to auto-detect camera node.")
+    finally:
+        node.destroy_node()
+        if started_here and rclpy.ok():
+            rclpy.shutdown()
+
+
+def ros_get_parameters(
+    target_node: str,
+    param_names: List[str],
+    timeout_sec: float,
+) -> Dict[str, Any]:
+    try:
+        import rclpy
+        from rcl_interfaces.srv import GetParameters
+        from rcl_interfaces.msg import ParameterType
+    except ImportError as exc:
+        raise RuntimeError("rclpy/rcl_interfaces are required for ROS parameter access.") from exc
+
+    started_here = False
+    if not rclpy.ok():
+        rclpy.init(args=None)
+        started_here = True
+
+    node = rclpy.create_node(f"rs_bench_get_params_{int(time.time() * 1000) % 1000000}")
+    try:
+        service_name = f"{target_node}/get_parameters"
+        client = node.create_client(GetParameters, service_name)
+        if not client.wait_for_service(timeout_sec=timeout_sec):
+            raise RuntimeError(
+                f"Parameter service '{service_name}' is not available."
+            )
+
+        request = GetParameters.Request()
+        request.names = list(param_names)
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_sec)
+        if not future.done():
+            raise RuntimeError(
+                f"Timeout waiting for response from '{service_name}'."
+            )
+        if future.exception() is not None:
+            raise RuntimeError(
+                f"Service call '{service_name}' failed: {future.exception()}"
+            )
+        result = future.result()
+        if result is None or len(result.values) != len(param_names):
+            raise RuntimeError(f"Could not read parameters from node '{target_node}'.")
+
+        out: Dict[str, Any] = {}
+        missing: List[str] = []
+        for name, value_msg in zip(param_names, result.values):
+            if value_msg.type == ParameterType.PARAMETER_NOT_SET:
+                missing.append(name)
+                continue
+            out[name] = _parameter_value_to_python(value_msg, ParameterType)
+
+        if missing:
+            raise RuntimeError(
+                f"Node '{target_node}' is missing parameters: {', '.join(missing)}"
+            )
+        return out
+    finally:
+        node.destroy_node()
+        if started_here and rclpy.ok():
+            rclpy.shutdown()
+
+
+def _python_to_parameter_message(name: str, value: Any, parameter_type: Any, parameter_cls: Any, parameter_value_cls: Any) -> Any:
+    p = parameter_cls()
+    p.name = name
+    pv = parameter_value_cls()
+    if isinstance(value, bool):
+        pv.type = parameter_type.PARAMETER_BOOL
+        pv.bool_value = bool(value)
+    elif isinstance(value, int):
+        pv.type = parameter_type.PARAMETER_INTEGER
+        pv.integer_value = int(value)
+    elif isinstance(value, float):
+        pv.type = parameter_type.PARAMETER_DOUBLE
+        pv.double_value = float(value)
+    elif isinstance(value, str):
+        pv.type = parameter_type.PARAMETER_STRING
+        pv.string_value = str(value)
+    else:
+        raise RuntimeError(
+            f"Unsupported parameter type for '{name}': {type(value).__name__}. "
+            "Supported: bool, int, float, str."
+        )
+    p.value = pv
+    return p
+
+
+def ros_set_parameters(
+    target_node: str,
+    values: Dict[str, Any],
+    timeout_sec: float,
+) -> List[Dict[str, Any]]:
+    try:
+        import rclpy
+        from rcl_interfaces.msg import Parameter as RosParameter
+        from rcl_interfaces.msg import ParameterType, ParameterValue
+        from rcl_interfaces.srv import SetParameters
+    except ImportError as exc:
+        raise RuntimeError("rclpy is required for ROS parameter updates.") from exc
+
+    started_here = False
+    if not rclpy.ok():
+        rclpy.init(args=None)
+        started_here = True
+
+    node = rclpy.create_node(f"rs_bench_set_params_{int(time.time() * 1000) % 1000000}")
+    try:
+        service_name = f"{target_node}/set_parameters"
+        client = node.create_client(SetParameters, service_name)
+        if not client.wait_for_service(timeout_sec=timeout_sec):
+            raise RuntimeError(
+                f"Parameter service '{service_name}' is not available."
+            )
+
+        request = SetParameters.Request()
+        request.parameters = [
+            _python_to_parameter_message(
+                name=name,
+                value=value,
+                parameter_type=ParameterType,
+                parameter_cls=RosParameter,
+                parameter_value_cls=ParameterValue,
+            )
+            for name, value in values.items()
+        ]
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_sec)
+        if not future.done():
+            raise RuntimeError(
+                f"Timeout waiting for response from '{service_name}'."
+            )
+        if future.exception() is not None:
+            raise RuntimeError(
+                f"Service call '{service_name}' failed: {future.exception()}"
+            )
+        result = future.result()
+        if result is None:
+            raise RuntimeError(f"Could not set parameters on node '{target_node}'.")
+
+        status: List[Dict[str, Any]] = []
+        if len(result.results) != len(values):
+            raise RuntimeError(
+                f"Unexpected SetParameters response length from node '{target_node}'."
+            )
+        for name, r in zip(values.keys(), result.results):
+            status.append(
+                {
+                    "name": name,
+                    "successful": bool(r.successful),
+                    "reason": str(r.reason),
+                }
+            )
+        return status
+    finally:
+        node.destroy_node()
+        if started_here and rclpy.ok():
+            rclpy.shutdown()
+
+
+def ros_set_parameters_with_retry(
+    target_node: str,
+    values: Dict[str, Any],
+    timeout_sec: float,
+    retries: int,
+    retry_wait_sec: float,
+) -> List[Dict[str, Any]]:
+    attempts = max(1, int(retries))
+    last_exc: Optional[Exception] = None
+    for i in range(attempts):
+        try:
+            return ros_set_parameters(
+                target_node=target_node,
+                values=values,
+                timeout_sec=timeout_sec,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if i < attempts - 1:
+                print(
+                    f"[sweep] set_parameters attempt {i+1}/{attempts} failed: {exc}. "
+                    f"retrying in {retry_wait_sec:.2f}s ...",
+                    flush=True,
+                )
+                if retry_wait_sec > 0.0:
+                    time.sleep(retry_wait_sec)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Unexpected retry state while setting ROS parameters.")
+
+
+def build_filter_sweep_cases(include_all_off: bool) -> List[Tuple[str, Dict[str, bool]]]:
+    align = "align_depth.enable"
+    spatial = "spatial_filter.enable"
+    temporal = "temporal_filter.enable"
+    hole = "hole_filling_filter.enable"
+
+    cases: List[Tuple[str, Dict[str, bool]]] = [
+        ("baseline", {}),
+        ("align_off", {align: False}),
+        ("spatial_off", {spatial: False}),
+        ("temporal_off", {temporal: False}),
+        ("hole_filling_off", {hole: False}),
+    ]
+    if include_all_off:
+        cases.append(
+            (
+                "align_and_all_depth_filters_off",
+                {
+                    align: False,
+                    spatial: False,
+                    temporal: False,
+                    hole: False,
+                },
+            )
+        )
+    return cases
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -1100,12 +1597,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=60)
+    parser.add_argument(
+        "--target-fps",
+        type=float,
+        default=60.0,
+        help="Target FPS used for red->green color scale in performance matrix.",
+    )
     parser.add_argument("--interval-sec", type=float, default=1.0)
     parser.add_argument("--frame-timeout-sec", type=float, default=2.0)
     parser.add_argument("--serial", default="")
-    parser.add_argument("--ros-color-topic", default="/camera/camera/color/image_raw")
     parser.add_argument(
-        "--ros-depth-topic", default="/camera/camera/aligned_depth_to_color/image_raw"
+        "--ros-color-topic",
+        default="/camera/camera/color/image_raw",
+        help=(
+            "ROS color topic. Supports raw '/.../image_raw' and compressed "
+            "'/.../image_raw/compressed'."
+        ),
+    )
+    parser.add_argument(
+        "--ros-depth-topic",
+        default="/camera/camera/aligned_depth_to_color/image_raw",
+        help=(
+            "ROS depth topic. Supports raw '/.../image_raw' and compressed depth "
+            "'/.../image_raw/compressedDepth'."
+        ),
+    )
+    parser.add_argument(
+        "--ros-depth-topic-unaligned",
+        default="/camera/camera/depth/image_rect_raw",
+        help=(
+            "Fallback depth topic used during filter sweep when align_depth is disabled "
+            "and the aligned depth topic stops publishing. For compressed depth, pass "
+            "the matching '/compressedDepth' topic explicitly."
+        ),
     )
     parser.add_argument(
         "--ros-probe-timeout-sec",
@@ -1125,13 +1649,200 @@ def parse_args() -> argparse.Namespace:
         help="Fail rgbd ROS scenario if depth topic delivers no frames.",
     )
     parser.add_argument(
+        "--ros-camera-node",
+        default="/camera/camera",
+        help=(
+            "Target camera node for runtime parameter control "
+            "(e.g. /camera/camera). Use empty string for auto-discovery."
+        ),
+    )
+    parser.add_argument(
+        "--ros-param-timeout-sec",
+        type=float,
+        default=5.0,
+        help="Timeout for ROS parameter get/set service calls.",
+    )
+    parser.add_argument(
+        "--ros-param-retries",
+        type=int,
+        default=3,
+        help="Retry attempts for ROS set_parameters in filter sweep.",
+    )
+    parser.add_argument(
+        "--ros-param-retry-wait-sec",
+        type=float,
+        default=0.75,
+        help="Delay between set_parameters retry attempts.",
+    )
+    parser.add_argument(
+        "--ros-param-settle-sec",
+        type=float,
+        default=1.0,
+        help="Wait time after applying camera parameter changes.",
+    )
+    parser.add_argument(
+        "--ros-filter-sweep",
+        action="store_true",
+        help=(
+            "Run ROS filter impact sweep (baseline + each depth processing toggle). "
+            "Forces rgbd scenario with per-case duration from --sweep-duration-sec."
+        ),
+    )
+    parser.add_argument(
+        "--sweep-duration-sec",
+        type=float,
+        default=15.0,
+        help="Measurement duration per sweep case (seconds).",
+    )
+    parser.add_argument(
+        "--sweep-include-all-off",
+        action="store_true",
+        help="Also benchmark a case with align + all depth filters disabled.",
+    )
+    parser.add_argument(
         "--log-dir",
         type=Path,
         default=Path("logs/camera_benchmark"),
         help="Output directory for CSV/JSON logs.",
     )
     parser.add_argument("--log-frames", action="store_true")
+    parser.add_argument(
+        "--color-output",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable ANSI color output for matrix values.",
+    )
     return parser.parse_args()
+
+
+def run_ros_filter_sweep(
+    args: argparse.Namespace,
+    run_id: str,
+    interval_writer: csv.DictWriter,
+    interval_file,
+    frame_writer: Optional[csv.DictWriter],
+    frame_file,
+) -> List[Dict[str, Any]]:
+    camera_node = resolve_ros_camera_node(args.ros_camera_node, args.ros_param_timeout_sec)
+    param_names = [
+        "align_depth.enable",
+        "spatial_filter.enable",
+        "temporal_filter.enable",
+        "hole_filling_filter.enable",
+    ]
+    baseline_values = ros_get_parameters(
+        target_node=camera_node,
+        param_names=param_names,
+        timeout_sec=args.ros_param_timeout_sec,
+    )
+    print(f"[sweep] camera node: {camera_node}", flush=True)
+    print(f"[sweep] baseline params: {baseline_values}", flush=True)
+
+    cases = build_filter_sweep_cases(include_all_off=args.sweep_include_all_off)
+    summaries: List[Dict[str, Any]] = []
+
+    sweep_args = argparse.Namespace(**vars(args))
+    sweep_args.mode = "rgbd"
+    sweep_args.duration_sec = float(args.sweep_duration_sec)
+    if sweep_args.duration_sec <= 0.0:
+        raise RuntimeError("--sweep-duration-sec must be > 0.")
+
+    try:
+        for case_name, overrides in cases:
+            target_values = dict(baseline_values)
+            target_values.update(overrides)
+            try:
+                set_status = ros_set_parameters_with_retry(
+                    target_node=camera_node,
+                    values=target_values,
+                    timeout_sec=args.ros_param_timeout_sec,
+                    retries=args.ros_param_retries,
+                    retry_wait_sec=args.ros_param_retry_wait_sec,
+                )
+                failed = [s for s in set_status if not s["successful"]]
+                if failed:
+                    raise RuntimeError(
+                        f"Failed to apply camera params for case '{case_name}': {failed}"
+                    )
+            except Exception as exc:
+                print(
+                    f"[sweep] WARNING: skipping case '{case_name}' due to parameter update failure: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                summaries.append(
+                    {
+                        "source": "ros",
+                        "scenario": f"rgbd__{case_name}",
+                        "sweep_case": case_name,
+                        "camera_node": camera_node,
+                        "camera_params_before_case": baseline_values,
+                        "camera_params_applied": target_values,
+                        "depth_topic_used": "",
+                        "error": str(exc),
+                        "stats": {},
+                    }
+                )
+                continue
+
+            if args.ros_param_settle_sec > 0.0:
+                time.sleep(args.ros_param_settle_sec)
+
+            case_args = argparse.Namespace(**vars(sweep_args))
+            if (
+                overrides.get("align_depth.enable") is False
+                and "aligned_depth_to_color" in str(args.ros_depth_topic)
+            ):
+                case_args.ros_depth_topic = args.ros_depth_topic_unaligned
+
+            scenario_name = f"rgbd__{case_name}"
+            print(
+                f"[sweep] case={case_name} overrides={overrides} "
+                f"depth_topic={case_args.ros_depth_topic} "
+                f"duration={sweep_args.duration_sec:.1f}s",
+                flush=True,
+            )
+            summary = collect_scenario_ros(
+                scenario=scenario_name,
+                args=case_args,
+                run_id=run_id,
+                interval_writer=interval_writer,
+                interval_file=interval_file,
+                frame_writer=frame_writer,
+                frame_file=frame_file,
+            )
+            summary["sweep_case"] = case_name
+            summary["camera_node"] = camera_node
+            summary["camera_params_before_case"] = baseline_values
+            summary["camera_params_applied"] = target_values
+            summary["depth_topic_used"] = case_args.ros_depth_topic
+            summaries.append(summary)
+    finally:
+        try:
+            restore_status = ros_set_parameters_with_retry(
+                target_node=camera_node,
+                values=baseline_values,
+                timeout_sec=args.ros_param_timeout_sec,
+                retries=args.ros_param_retries,
+                retry_wait_sec=args.ros_param_retry_wait_sec,
+            )
+            failed_restore = [s for s in restore_status if not s["successful"]]
+            if failed_restore:
+                print(
+                    f"[sweep] WARNING: failed to restore baseline camera params: {failed_restore}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                print("[sweep] camera parameters restored to baseline.", flush=True)
+        except Exception as exc:
+            print(
+                f"[sweep] WARNING: failed to restore baseline camera params: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    return summaries
 
 
 def main() -> int:
@@ -1143,15 +1854,39 @@ def main() -> int:
     if args.interval_sec <= 0.0:
         print("ERROR: --interval-sec must be > 0", file=sys.stderr)
         return 2
+    if args.target_fps <= 0.0:
+        print("ERROR: --target-fps must be > 0", file=sys.stderr)
+        return 2
     if args.ros_probe_timeout_sec <= 0.0:
         print("ERROR: --ros-probe-timeout-sec must be > 0", file=sys.stderr)
         return 2
     if args.ros_start_timeout_sec <= 0.0:
         print("ERROR: --ros-start-timeout-sec must be > 0", file=sys.stderr)
         return 2
+    if args.ros_param_timeout_sec <= 0.0:
+        print("ERROR: --ros-param-timeout-sec must be > 0", file=sys.stderr)
+        return 2
+    if args.ros_param_retries <= 0:
+        print("ERROR: --ros-param-retries must be > 0", file=sys.stderr)
+        return 2
+    if args.ros_param_retry_wait_sec < 0.0:
+        print("ERROR: --ros-param-retry-wait-sec must be >= 0", file=sys.stderr)
+        return 2
+    if args.ros_param_settle_sec < 0.0:
+        print("ERROR: --ros-param-settle-sec must be >= 0", file=sys.stderr)
+        return 2
+    if args.sweep_duration_sec <= 0.0:
+        print("ERROR: --sweep-duration-sec must be > 0", file=sys.stderr)
+        return 2
 
     selected_source, source_reason = detect_source(args)
     print(f"Selected source: {selected_source} ({source_reason})", flush=True)
+    if args.ros_filter_sweep and selected_source != "ros":
+        print(
+            "ERROR: --ros-filter-sweep requires source 'ros' (driver running and ROS topics available).",
+            file=sys.stderr,
+        )
+        return 2
 
     rs = None
     if selected_source == "direct":
@@ -1182,6 +1917,7 @@ def main() -> int:
     interval_path = log_dir / f"{run_id}_intervals.csv"
     summary_path = log_dir / f"{run_id}_summary.json"
     frame_path = log_dir / f"{run_id}_frames.csv"
+    matrix_path = log_dir / f"{run_id}_matrix.csv"
 
     print(f"Run ID: {run_id}", flush=True)
     print(f"Logs dir: {log_dir.resolve()}", flush=True)
@@ -1249,32 +1985,44 @@ def main() -> int:
             frame_file.flush()
 
         try:
-            for scenario in scenarios:
-                if selected_source == "direct":
-                    summaries.append(
-                        collect_scenario_direct(
-                            rs=rs,
-                            scenario=scenario,
-                            args=args,
-                            run_id=run_id,
-                            interval_writer=interval_writer,
-                            interval_file=interval_file,
-                            frame_writer=frame_writer,
-                            frame_file=frame_file,
-                        )
+            if args.ros_filter_sweep:
+                summaries.extend(
+                    run_ros_filter_sweep(
+                        args=args,
+                        run_id=run_id,
+                        interval_writer=interval_writer,
+                        interval_file=interval_file,
+                        frame_writer=frame_writer,
+                        frame_file=frame_file,
                     )
-                else:
-                    summaries.append(
-                        collect_scenario_ros(
-                            scenario=scenario,
-                            args=args,
-                            run_id=run_id,
-                            interval_writer=interval_writer,
-                            interval_file=interval_file,
-                            frame_writer=frame_writer,
-                            frame_file=frame_file,
+                )
+            else:
+                for scenario in scenarios:
+                    if selected_source == "direct":
+                        summaries.append(
+                            collect_scenario_direct(
+                                rs=rs,
+                                scenario=scenario,
+                                args=args,
+                                run_id=run_id,
+                                interval_writer=interval_writer,
+                                interval_file=interval_file,
+                                frame_writer=frame_writer,
+                                frame_file=frame_file,
+                            )
                         )
-                    )
+                    else:
+                        summaries.append(
+                            collect_scenario_ros(
+                                scenario=scenario,
+                                args=args,
+                                run_id=run_id,
+                                interval_writer=interval_writer,
+                                interval_file=interval_file,
+                                frame_writer=frame_writer,
+                                frame_file=frame_file,
+                            )
+                        )
         finally:
             if frame_file is not None:
                 frame_file.close()
@@ -1290,7 +2038,7 @@ def main() -> int:
 
     by_scenario = {s["scenario"]: s for s in summaries}
     comparison = None
-    if "rgb" in by_scenario and "rgbd" in by_scenario:
+    if "rgb" in by_scenario and "rgbd" in by_scenario and not args.ros_filter_sweep:
         rgb_fps = by_scenario["rgb"]["stats"]["avg_fps_primary"]
         rgbd_fps = by_scenario["rgbd"]["stats"]["avg_fps_primary"]
         comparison = {
@@ -1318,6 +2066,7 @@ def main() -> int:
         "source_reason": source_reason,
         "args": args_to_json_dict(args),
         "interval_csv": str(interval_path.resolve()),
+        "matrix_csv": str(matrix_path.resolve()),
         "frame_csv": str(frame_path.resolve()) if args.log_frames else None,
         "scenarios": summaries,
         "comparison": comparison,
@@ -1325,14 +2074,25 @@ def main() -> int:
             "auto source selection uses ROS topic activity on ros_color_topic.",
             "direct mode can fail if another process already owns the camera device.",
             "ROS mode measures topic throughput, not direct USB camera throughput.",
+            "ROS topic mode supports both sensor_msgs/Image and sensor_msgs/CompressedImage topics.",
+            "ros-filter-sweep applies runtime camera parameters on realsense node and restores baseline after run.",
         ],
     }
+
+    write_performance_matrix_csv(summaries=summaries, output_path=matrix_path)
 
     with summary_path.open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
+    print_performance_matrix(
+        summaries=summaries,
+        target_fps=float(args.target_fps),
+        use_color=bool(args.color_output),
+    )
+
     print(f"Summary JSON: {summary_path.resolve()}", flush=True)
     print(f"Intervals CSV: {interval_path.resolve()}", flush=True)
+    print(f"Matrix CSV:    {matrix_path.resolve()}", flush=True)
     if args.log_frames:
         print(f"Frames CSV:   {frame_path.resolve()}", flush=True)
     if comparison is not None:
