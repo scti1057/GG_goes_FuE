@@ -299,8 +299,8 @@ class IbvsTwistControllerNode(Node):
     @staticmethod
     def _to_twist(v6: np.ndarray) -> Twist:
         msg = Twist()
-        msg.linear.x = float(v6[0])
-        msg.linear.y = float(v6[1])
+        msg.linear.x = float(-v6[1])
+        msg.linear.y = float(v6[0])
         msg.linear.z = float(v6[2])
         msg.angular.x = float(v6[3])
         msg.angular.y = float(v6[4])
