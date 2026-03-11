@@ -44,19 +44,6 @@ class UnscentedKalmanFilter(BaseFilter):
         super().force_relocalization()
         self.P = np.eye(self.L) * 1000.0 
 
-    def _transform_twist_ee_to_cam(self, v_ee):
-        """Transformiert den Twist vom Endeffektor- ins Kamerakoordinatensystem"""
-        # In robot_sim.py: T_ee_cam = SE3(0, 0, 0) * SE3.Rz(np.pi)
-        # Drehung um 180 Grad um Z bedeutet: x' = -x, y' = -y, z' = z
-        v_cam = np.zeros(6)
-        v_cam[0] = -v_ee[0] # vx
-        v_cam[1] =  v_ee[1] # vy
-        v_cam[2] =  v_ee[2] # vz
-        v_cam[3] = -v_ee[3] # wx
-        v_cam[4] = -v_ee[4] # wy
-        v_cam[5] = -v_ee[5] # wz
-        return v_cam
-
     def _compute_pixel_velocities(self, state_8d, v_cam, Z_est):
         s_dot = np.zeros((self.L, 1))
         pts_norm = self.ibvs_math.pixel2normalized(state_8d.reshape(4, 2).T)

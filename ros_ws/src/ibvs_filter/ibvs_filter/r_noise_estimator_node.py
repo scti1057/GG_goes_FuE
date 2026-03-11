@@ -7,6 +7,14 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from ibvs_msgs.msg import Matches, Keypoints
 from ibvs_filter.core.base import BaseFilter
 
+"""
+ros2 run ibvs_filter r_noise_estimator --ros-args \
+  -p sample_count:=500 \
+  -p min_matches:=4 \
+  -p scalar_estimator:=median \
+  -p inflation_factor:=1.5
+"""
+
 
 class RNoiseEstimatorNode(Node):
     def __init__(self):

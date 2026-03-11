@@ -110,5 +110,21 @@ class BaseFilter:
 
         return proxy_ref, proxy_est
 
+    def _transform_twist_ee_to_cam(self, v_ee):
+        """Map project-specific EE twist components into the camera frame.
+
+        The current convention used by the IBVS filters is:
+        [vx, vy, vz, wx, wy, wz] -> [-vx, +vy, +vz, -wx, -wy, -wz]
+        """
+        v_ee = np.asarray(v_ee, dtype=np.float64).reshape(6,)
+        return np.array([
+            -v_ee[0],
+             v_ee[1],
+             v_ee[2],
+             v_ee[3],
+             v_ee[4],
+            -v_ee[5],
+        ], dtype=np.float64)
+
     def predict(self, v_ee, Z_est, dt): raise NotImplementedError
     def update(self, current_pixels, desired_pixels): raise NotImplementedError

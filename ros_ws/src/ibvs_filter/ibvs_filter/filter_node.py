@@ -42,6 +42,7 @@ class FilterNode(Node):
         self.declare_parameter('camera_velocity_stale_timeout', 0.2)
         self.declare_parameter('proxy_corners_topic', '/ibvs/filter/proxy_corners')
         self.declare_parameter('image_topic', '/camera/camera/color/image_raw/compressed')
+        self.declare_parameter('debug_image_publish_rate', 30.0)
         
         # Debug Flag
         self.declare_parameter('debug', True)
@@ -65,6 +66,9 @@ class FilterNode(Node):
             self.get_parameter('camera_velocity_stale_timeout').value
         )
         self.proxy_corners_topic = self.get_parameter('proxy_corners_topic').value
+        self.debug_image_publish_rate = float(
+            self.get_parameter('debug_image_publish_rate').value
+        )
         self.debug_mode = self.get_parameter('debug').value
         self.predict_rate = self.get_parameter('predict_rate').value
         
@@ -81,6 +85,8 @@ class FilterNode(Node):
         self.last_desired_pixels = None
         self.latest_bgr = None
         self.latest_img_header = None
+        self.debug_publish_lock = threading.Lock()
+        self.last_debug_publish_time = None
         
         # Letzter Twist aus /cmd_vel (angenommen im Kamera-Bezugssystem)
         self.pose_lock = threading.Lock()
@@ -195,6 +201,7 @@ class FilterNode(Node):
         next_deadband_lin = self.camera_velocity_deadband_linear
         next_deadband_ang = self.camera_velocity_deadband_angular
         next_stale_timeout = self.camera_velocity_stale_timeout
+        next_debug_image_publish_rate = self.debug_image_publish_rate
 
         for p in params:
             if p.name == 'filter_type':
@@ -246,6 +253,13 @@ class FilterNode(Node):
                         reason='camera_velocity_stale_timeout must be > 0',
                     )
                 next_stale_timeout = float(p.value)
+            elif p.name == 'debug_image_publish_rate':
+                if p.value <= 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='debug_image_publish_rate must be > 0',
+                    )
+                next_debug_image_publish_rate = float(p.value)
 
         self.q_noise = next_q
         self.r_noise = next_r
@@ -255,13 +269,15 @@ class FilterNode(Node):
         self.camera_velocity_deadband_linear = next_deadband_lin
         self.camera_velocity_deadband_angular = next_deadband_ang
         self.camera_velocity_stale_timeout = next_stale_timeout
+        self.debug_image_publish_rate = next_debug_image_publish_rate
 
         if self.filter is not None:
             self.filter.set_Q_R_gate(self.q_noise, self.r_noise, self.gate_threshold)
             self.get_logger().info(
                 f"Tuning updated: q_noise={self.q_noise:.4f}, "
                 f"r_noise={self.r_noise:.4f}, gate_threshold={self.gate_threshold:.4f}, "
-                f"z_depth={self.z_depth:.4f}, proxy_max_p_trace={self.proxy_max_p_trace:.2f}"
+                f"z_depth={self.z_depth:.4f}, proxy_max_p_trace={self.proxy_max_p_trace:.2f}, "
+                f"debug_image_publish_rate={self.debug_image_publish_rate:.2f}"
             )
 
         return SetParametersResult(successful=True)
@@ -318,6 +334,16 @@ class FilterNode(Node):
         if dt <= 0.0 or dt > 1.0:
             return 1.0 / float(self.predict_rate)
         return dt
+
+    def _consume_debug_publish_slot(self) -> bool:
+        now_sec = self.get_clock().now().nanoseconds * 1e-9
+        min_period = 1.0 / float(self.debug_image_publish_rate)
+        with self.debug_publish_lock:
+            if self.last_debug_publish_time is not None:
+                if (now_sec - self.last_debug_publish_time) < min_period:
+                    return False
+            self.last_debug_publish_time = now_sec
+        return True
 
     def timer_callback(self):
         """1. Predict Schritt: Wird mit fester Frequenz ausgeführt."""
@@ -429,6 +455,8 @@ class FilterNode(Node):
     def image_callback(self, img_msg: Any):
         """3. Debug Schritt: Zeichnet Overlay, wenn ein Bild kommt."""
         if not self.debug_mode or self.filter is None:
+            return
+        if not self._consume_debug_publish_slot():
             return
 
         try:
