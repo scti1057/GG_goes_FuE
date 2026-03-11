@@ -32,6 +32,7 @@ class FilterNode(Node):
         self.declare_parameter('z_depth', 0.25)
         self.declare_parameter('gate_threshold', 20.0)
         self.declare_parameter('predict_rate', 250.0) # Hz (Reduziert für Performance, 60Hz reicht völlig)
+        self.declare_parameter('proxy_max_p_trace', 20000.0)
         
         self.declare_parameter('base_frame', 'base_link') 
         self.declare_parameter('camera_frame', 'camera_color_frame') # camera_color_optical_frame
@@ -50,6 +51,7 @@ class FilterNode(Node):
         self.r_noise = self.get_parameter('r_noise').value
         self.gate_threshold = self.get_parameter('gate_threshold').value
         self.z_depth = self.get_parameter('z_depth').value
+        self.proxy_max_p_trace = float(self.get_parameter('proxy_max_p_trace').value)
         self.base_frame = self.get_parameter('base_frame').value
         self.camera_frame = self.get_parameter('camera_frame').value
         self.camera_velocity_topic = self.get_parameter('camera_velocity_topic').value
@@ -189,6 +191,7 @@ class FilterNode(Node):
         next_r = self.r_noise
         next_gate = self.gate_threshold
         next_z = self.z_depth
+        next_proxy_max_p_trace = self.proxy_max_p_trace
         next_deadband_lin = self.camera_velocity_deadband_linear
         next_deadband_ang = self.camera_velocity_deadband_angular
         next_stale_timeout = self.camera_velocity_stale_timeout
@@ -215,6 +218,13 @@ class FilterNode(Node):
                 if p.value <= 0.0:
                     return SetParametersResult(successful=False, reason='z_depth must be > 0')
                 next_z = float(p.value)
+            elif p.name == 'proxy_max_p_trace':
+                if p.value < 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='proxy_max_p_trace must be >= 0',
+                    )
+                next_proxy_max_p_trace = float(p.value)
             elif p.name == 'camera_velocity_deadband_linear':
                 if p.value < 0.0:
                     return SetParametersResult(
@@ -241,6 +251,7 @@ class FilterNode(Node):
         self.r_noise = next_r
         self.gate_threshold = next_gate
         self.z_depth = next_z
+        self.proxy_max_p_trace = next_proxy_max_p_trace
         self.camera_velocity_deadband_linear = next_deadband_lin
         self.camera_velocity_deadband_angular = next_deadband_ang
         self.camera_velocity_stale_timeout = next_stale_timeout
@@ -250,7 +261,7 @@ class FilterNode(Node):
             self.get_logger().info(
                 f"Tuning updated: q_noise={self.q_noise:.4f}, "
                 f"r_noise={self.r_noise:.4f}, gate_threshold={self.gate_threshold:.4f}, "
-                f"z_depth={self.z_depth:.4f}"
+                f"z_depth={self.z_depth:.4f}, proxy_max_p_trace={self.proxy_max_p_trace:.2f}"
             )
 
         return SetParametersResult(successful=True)
@@ -332,6 +343,7 @@ class FilterNode(Node):
             all_reference_pts = self.reference_keypoints_raw.reshape(-1, 2).T
             filtered_current_pts = self.filter.get_projected_points(all_reference_pts)
             proxy_ref, proxy_est = self.filter.get_proxy_corners()
+            p_trace = float(np.trace(self.filter.P)) if hasattr(self.filter, 'P') else 0.0
 
         # Nachricht im Matches-Format bauen
         out_msg = Matches()
@@ -345,9 +357,9 @@ class FilterNode(Node):
         out_msg.sim = [1.0] * num_pts # Da vom Filter generiert, setzen wir Confidence auf 1.0
         
         self.pub_filtered_points.publish(out_msg)
-        self.publish_proxy_corners(proxy_ref, proxy_est)
+        self.publish_proxy_corners(proxy_ref, proxy_est, p_trace)
 
-    def publish_proxy_corners(self, proxy_ref, proxy_est):
+    def publish_proxy_corners(self, proxy_ref, proxy_est, p_trace):
         msg = ProxyCorners()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.camera_frame
@@ -370,8 +382,16 @@ class FilterNode(Node):
             self.pub_proxy_corners.publish(msg)
             return
 
+        max_trace = max(0.0, float(self.proxy_max_p_trace))
+        if max_trace > 0.0:
+            msg.quality = float(1.0 / (1.0 + (max(0.0, p_trace) / max_trace)))
+            if p_trace > max_trace:
+                self.pub_proxy_corners.publish(msg)
+                return
+        else:
+            msg.quality = 1.0
+
         msg.valid = True
-        msg.quality = 1.0
         msg.ref_xy = proxy_ref.reshape(-1).tolist()
         msg.cur_xy = proxy_est.reshape(-1).tolist()
         self.pub_proxy_corners.publish(msg)
