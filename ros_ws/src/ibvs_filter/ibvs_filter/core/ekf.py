@@ -37,7 +37,7 @@ class ExtendedKalmanFilter(BaseFilter):
         # Drehung um 180 Grad um Z bedeutet: x' = -x, y' = -y, z' = z
         v_cam = np.zeros(6)
         v_cam[0] = -v_ee[0] # vx
-        v_cam[1] = -v_ee[1] # vy
+        v_cam[1] =  v_ee[1] # vy
         v_cam[2] =  v_ee[2] # vz
         v_cam[3] = -v_ee[3] # wx
         v_cam[4] = -v_ee[4] # wy

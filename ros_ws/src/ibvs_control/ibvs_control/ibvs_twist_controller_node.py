@@ -34,7 +34,7 @@ class IbvsTwistControllerNode(Node):
         self.declare_parameter('cy', 240.0)
 
         # IBVS core parameters.
-        self.declare_parameter('lambda_gain', 0.12)
+        self.declare_parameter('lambda_gain', 0.36)
         self.declare_parameter('dls_damping', 0.1)
         self.declare_parameter('z_est', 0.25)
         self.declare_parameter('publish_rate_hz', 30.0)
@@ -47,8 +47,8 @@ class IbvsTwistControllerNode(Node):
         self.declare_parameter('proxy_timeout_sec', 0.25)
         self.declare_parameter('error_stop_px', 10.0)
         self.declare_parameter('stop_hold_sec', 0.8)
-        self.declare_parameter('max_linear_speed', 0.004)
-        self.declare_parameter('max_angular_speed', 0.05)
+        self.declare_parameter('max_linear_speed', 0.012)
+        self.declare_parameter('max_angular_speed', 0.15)
         self.declare_parameter('log_period_sec', 1.0)
         self.declare_parameter('use_proxy_corners', True)
         self.declare_parameter('proxy_fallback_to_matches', True)
@@ -64,7 +64,7 @@ class IbvsTwistControllerNode(Node):
         # Axis sign tuning for camera-to-tcp frame convention.
         self.declare_parameter('axis_sign_vx', -1.0)
         self.declare_parameter('axis_sign_vy', 1.0)
-        self.declare_parameter('axis_sign_vz', -1.0)
+        self.declare_parameter('axis_sign_vz', 0) #-1.0
         self.declare_parameter('axis_sign_wx', 1.0)
         self.declare_parameter('axis_sign_wy', 1.0)
         self.declare_parameter('axis_sign_wz', -1.0)
@@ -299,8 +299,8 @@ class IbvsTwistControllerNode(Node):
     @staticmethod
     def _to_twist(v6: np.ndarray) -> Twist:
         msg = Twist()
-        msg.linear.x = float(-v6[1])
-        msg.linear.y = float(v6[0])
+        msg.linear.x = float(v6[0])
+        msg.linear.y = float(v6[1])
         msg.linear.z = float(v6[2])
         msg.angular.x = float(v6[3])
         msg.angular.y = float(v6[4])
