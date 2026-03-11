@@ -58,7 +58,7 @@ class BaseFilter:
             
         return z_k, H_raw, self.status
 
-    def _check_geometry_and_update_H(self, state_8d):
+    def _check_geometry_and_update_H(self, state_8d, log_on_fail=True):
         proxy_filtered = state_8d.reshape(4, 2).astype(np.float32)
         
         def cross_z(A, B, C):
@@ -73,14 +73,22 @@ class BaseFilter:
         is_convex = all(signs) or not any(signs)
         
         if not is_convex:
-            print("\n[Filter WARNING] Geometry check failed (Topology Flip).")
-            print(("[Filter WARNING] Coordinates of the 4 corners:"))
-            print(proxy_filtered)
-            print(20*"-")
+            if log_on_fail:
+                print("\n[Filter WARNING] Geometry check failed (Topology Flip).")
+                print(("[Filter WARNING] Coordinates of the 4 corners:"))
+                print(proxy_filtered)
+                print(20*"-")
             return False
             
         self.H_filtered = cv2.getPerspectiveTransform(self.proxy_ref, proxy_filtered)
         return True
+
+    def update_geometry_from_state(self, state_8d, log_on_fail=False):
+        """Update H_filtered from a predicted 8D corner state."""
+        if self.proxy_ref is None:
+            return False
+        state_8d = np.asarray(state_8d, dtype=np.float64).reshape(8, 1)
+        return self._check_geometry_and_update_H(state_8d, log_on_fail=log_on_fail)
 
     def get_projected_points(self, desired_features):
         if not self.initialized or self.H_filtered is None:

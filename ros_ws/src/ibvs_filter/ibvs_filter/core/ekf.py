@@ -41,7 +41,7 @@ class ExtendedKalmanFilter(BaseFilter):
         v_cam[2] =  v_ee[2] # vz
         v_cam[3] = -v_ee[3] # wx
         v_cam[4] = -v_ee[4] # wy
-        v_cam[5] =  v_ee[5] # wz
+        v_cam[5] = -v_ee[5] # wz
         return v_cam
 
     def _compute_pixel_velocities(self, state_8d, v_cam, Z_est):
@@ -95,7 +95,10 @@ class ExtendedKalmanFilter(BaseFilter):
 
         # 5. Kovarianz-Update
         self.P = F_k @ self.P @ F_k.T + self.Q
-        self.status = "PREDICT"
+        if self.update_geometry_from_state(self.x, log_on_fail=False):
+            self.status = "PREDICT"
+        else:
+            self.status = "PREDICT (GEOMETRY HOLD)"
 
     def update(self, current_pixels, desired_pixels):
         # 1. Messung über Base-Class generieren

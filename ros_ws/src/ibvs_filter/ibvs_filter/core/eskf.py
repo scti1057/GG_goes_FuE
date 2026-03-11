@@ -32,9 +32,16 @@ class ErrorStateKalmanFilter(BaseFilter):
         self.dx = np.zeros((self.L, 1)) # Fehler ebenfalls zurücksetzen
 
     def _transform_twist_ee_to_cam(self, v_ee):
+        """Transformiert den Twist vom Endeffektor- ins Kamerakoordinatensystem"""
+        # In robot_sim.py: T_ee_cam = SE3(0, 0, 0) * SE3.Rz(np.pi)
+        # Drehung um 180 Grad um Z bedeutet: x' = -x, y' = -y, z' = z
         v_cam = np.zeros(6)
-        v_cam[0], v_cam[1], v_cam[2] = -v_ee[0], -v_ee[1], v_ee[2]
-        v_cam[3], v_cam[4], v_cam[5] = -v_ee[3], -v_ee[4], v_ee[5]
+        v_cam[0] = -v_ee[0] # vx
+        v_cam[1] =  v_ee[1] # vy
+        v_cam[2] =  v_ee[2] # vz
+        v_cam[3] = -v_ee[3] # wx
+        v_cam[4] = -v_ee[4] # wy
+        v_cam[5] = -v_ee[5] # wz
         return v_cam
 
     def _compute_pixel_velocities(self, state_8d, v_cam, Z_est):
@@ -71,7 +78,10 @@ class ErrorStateKalmanFilter(BaseFilter):
             F_dx[:, i] += ((s_dot_plus - s_dot) / epsilon)[:, 0] * dt
 
         self.P = F_dx @ self.P @ F_dx.T + self.Q
-        self.status = "PREDICT"
+        if self.update_geometry_from_state(self.x_nom, log_on_fail=False):
+            self.status = "PREDICT"
+        else:
+            self.status = "PREDICT (GEOMETRY HOLD)"
 
     def update(self, current_pixels, desired_pixels):
         z_k, H_raw, self.status = self._get_raw_measurement(current_pixels, desired_pixels)

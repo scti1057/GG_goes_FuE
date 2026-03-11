@@ -47,8 +47,10 @@ class StandardKalmanFilter(BaseFilter):
             
         self.x = self.F @ self.x
         self.P = self.F @ self.P @ self.F.T + self.Q
-        
-        self.status = "PREDICT"
+        if self.update_geometry_from_state(self.x[0:8], log_on_fail=False):
+            self.status = "PREDICT"
+        else:
+            self.status = "PREDICT (GEOMETRY HOLD)"
 
     def update(self, current_pixels, desired_pixels):
         # 1. Messung über Base-Class generieren (dynamische Bounding-Box greift hier!)
