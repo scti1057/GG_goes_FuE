@@ -30,6 +30,7 @@ GG_goes_FuE/
 │  │  ├─ ibvs_perception/
 │  │  ├─ ibvs_reference/
 │  │  ├─ ibvs_matching/
+│  │  ├─ ibvs_filter/
 │  │  └─ ibvs_control/
 │  └─ third_party/
 └─ README.md
@@ -40,8 +41,9 @@ Pipeline:
 1. `ibvs_perception/keypoint` detects keypoints + descriptors on camera images.
 2. `ibvs_reference/reference_manager` captures a robust reference set (time window + consistency counts).
 3. `ibvs_matching/descriptor_matcher` matches live descriptors to reference descriptors.
-4. `ibvs_matching/matches_viz` visualizes match tracks with fade logic.
-5. `ibvs_control/ibvs_twist_controller` computes IBVS twist and publishes to UR twist controller.
+4. `ibvs_filter/filter_node` tracks a bounded active keypoint set with EKF/UKF/ESKF/SKF.
+5. `ibvs_filter/filter_debug_node` overlays raw vs. filtered features and filter diagnostics.
+6. `ibvs_control/ibvs_twist_controller` computes IBVS twist from selected feature source (`filtered` or `raw`) and publishes to UR twist controller.
 
 Data flow:
 ```
@@ -57,7 +59,14 @@ Data flow:
                                                        |
                                                        +--> matches_viz --> /ibvs/debug/matches_image
                                                        |
-                                                       +--> ibvs_twist_controller --> /cartesian_twist_passthrough_controller/cmd_vel
+                                                       +--> filter_node --> /ibvs/filtered_features
+                                                       |                  /ibvs/filter/status
+                                                       |                  /ibvs/filter/uncertainty
+                                                       |
+                                                       +--> filter_debug_node --> /ibvs/filter_debug_image
+                                                       |
+                                                       +--> ibvs_twist_controller (raw/filtered select)
+                                                             --> /cartesian_twist_passthrough_controller/cmd_vel
 ```
 
 ## 4) Docker Architecture
@@ -176,16 +185,221 @@ Important params:
 - `miss_max`
 - `radius`
 
-## 5.6 `ibvs_control` - `ibvs_twist_controller`
+## 5.6 `ibvs_filter` - `filter_node`
+Node: `ibvs_filter.filter_node`
+
+Purpose:
+- Keep a bounded active set of reference-indexed keypoints (`max_active_keypoints`).
+- Predict and update active features in image space (EKF/UKF/ESKF/SKF).
+- Publish directly the active filtered points (not proxy corners, no proxy model).
+
+Subscriptions:
+- `/camera/camera/color/camera_info`
+- `/ibvs/reference/keypoints` (transient_local)
+- `/ibvs/matches` (raw descriptor matches)
+- camera velocity topic (default `/cartesian_twist_passthrough_controller/cmd_vel`)
+
+Publications:
+- `/ibvs/filtered_features` (`ibvs_msgs/Matches`, `ref_id` = active keypoint ids, `xy` = filtered state)
+- `/ibvs/filter/status` (`std_msgs/String`)
+- `/ibvs/filter/uncertainty` (`std_msgs/Float32`, `trace(P)`)
+- `/ibvs/filter/update_status` (`std_msgs/String`)
+- `/ibvs/filter/update_count` (`std_msgs/UInt32`)
+- `/ibvs/filter/update_success_count` (`std_msgs/UInt32`)
+- `/ibvs/filter/active_count` (`std_msgs/UInt32`)
+
+Important params:
+- `filter_type`: `ekf|ukf|eskf|skf`
+- `q_noise`, `r_noise`, `gate_threshold`, `z_depth`, `predict_rate`
+- `max_active_keypoints`, `min_init_keypoints`, `min_update_keypoints`
+- `camera_velocity_deadband_linear`, `camera_velocity_deadband_angular`, `camera_velocity_stale_timeout`
+
+### 5.6.1 Filter-Ablauf im Detail (pro Zyklus)
+
+Schritt 1: Eingang der Roh-Matches (`/ibvs/matches`, Update-Pfad)
+- Für jedes Match wird `ref_id` gegen die Referenzliste geprüft.
+- Es werden `current_pixels`, `desired_pixels`, `ref_ids`, `sim` aufgebaut.
+- Der Update-Schritt läuft eventbasiert nur, wenn Matches ankommen.
+
+Schritt 2: Aufbereitung und aktives Set
+- Doppelte `ref_id` werden entfernt (behalten wird der Eintrag mit höherer `sim`).
+- Falls noch kein aktives Set existiert:
+  - Es braucht mindestens `min_init_keypoints`.
+  - Danach wird ein aktives Set bis `max_active_keypoints` gewählt.
+  - Auswahlprinzip: räumliche Verteilung (farthest-point-artig) mit leichtem Score-Bias.
+- Aktives Set bedeutet: genau diese `ref_id` liegen im Filterzustand.
+
+Schritt 3: Update gegen beobachtete aktive Punkte
+- Aus den aktuellen Matches werden nur die Punkte genutzt, deren `ref_id` im aktiven Set ist.
+- Daraus entsteht eine partielle Messung `z` und eine Auswahlmatrix `H_obs` (sparse).
+- Gating erfolgt über (normalisierte) Mahalanobis-Distanz.
+- Bei erfolgreichem Update: Status `UPDATE` (oder `INIT`/`RELOCALIZED`).
+- Bei Fehlschlag: z. B. `REJECT (OUTLIER)`, `REJECT (SINGULAR)`, `REJECT (GEOMETRY)`.
+
+Schritt 4: Predict im Timer-Pfad
+- Unabhängig von Matches läuft mit `predict_rate` die Prädiktion.
+- Eingang ist der Kameratwist aus dem Velocity-Topic.
+- Ergebnisstatus im Timer ist typischerweise `PREDICT` (oder `PREDICT (GEOMETRY HOLD)`).
+
+Schritt 5: Publikation
+- `/ibvs/filtered_features` enthält direkt die aktiv gefilterten Zustandspunkte:
+  - `ref_id = active_ref_ids`
+  - `xy = gefilterte Punkte des aktiven Zustands`
+- Zusätzlich werden Meta-Topics publiziert:
+  - `/ibvs/filter/status`
+  - `/ibvs/filter/uncertainty` (`trace(P)`)
+  - `/ibvs/filter/update_status`
+  - `/ibvs/filter/update_count`
+  - `/ibvs/filter/update_success_count`
+  - `/ibvs/filter/active_count`
+
+### 5.6.2 Fallunterscheidung (inkl. "10 Keypoints"-Beispiel)
+
+Fall A: Erstinitialisierung, zu wenige Matches
+- Bedingung: noch kein aktives Set und `< min_init_keypoints`.
+- Ergebnis: keine Initialisierung, kein Zustandsupdate.
+- Status im Update-Pfad bleibt reject/missing.
+
+Fall B: Erstinitialisierung, genug Matches
+- Bedingung: noch kein aktives Set und `>= min_init_keypoints`.
+- Ergebnis: aktives Set wird aufgebaut, Zustand wird initial aus den gewählten Punkten gesetzt.
+- Status: `INIT`.
+
+Fall C: Laufender Betrieb, genug aktive Beobachtungen
+- Bedingung: aktives Set vorhanden und beobachtete aktive Punkte `>= min_update_keypoints`.
+- Ergebnis: partielles Update nur auf diese beobachteten aktiven IDs.
+- Nicht beobachtete aktive Punkte bleiben über Predict im Zustand erhalten.
+
+Fall D: Laufender Betrieb, zu wenige aktive Beobachtungen
+- Bedingung: beobachtete aktive Punkte `< min_update_keypoints`.
+- Ergebnis: Relokalisierungsversuch aus den aktuellen Roh-Matches.
+- Wenn Relokalisierung genug Punkte hat (`>= min_init_keypoints`):
+  - neues aktives Set wird gewählt, Zustand neu gesetzt.
+  - Status: `RELOCALIZED`.
+- Wenn Relokalisierung zu wenige Punkte hat:
+  - kein Update; altes aktives Set bleibt bestehen.
+  - es läuft nur Predict weiter.
+
+Fall E: Dein Beispiel "10 ursprünglich getrackte Keypoints"
+- Angenommen `N_active = 10`, `min_update_keypoints = 4`.
+- Wenn in einem Frame 6 dieser 10 wiedergefunden werden:
+  - Update läuft auf diesen 6.
+  - Die fehlenden 4 bleiben im Zustand und werden nur prädiziert.
+- Wenn nur 3 von 10 wiedergefunden werden:
+  - Update ist zu schwach (`3 < 4`), Relokalisierung wird versucht.
+  - Dann können auch bisher nicht aktive Matches ins neue aktive Set aufgenommen werden.
+  - Die "ursprünglichen 10" sind nicht fest reserviert; aktives Set kann ersetzt werden.
+
+Fall F: Was passiert mit "den restlichen" (nicht aktiven) Matches?
+- Im normalen Update: sie werden ignoriert (sie sind nicht Teil des Zustands).
+- Bei Initialisierung/Relokalisierung: sie sind Kandidaten und können aktiv werden.
+
+### 5.6.3 Auswahl des aktiven Sets (wann es sich ändert)
+
+Grundidee:
+- Das aktive Set ist eine feste Liste von `ref_id` im aktuellen Filterzustand.
+- Diese Liste wird **nicht** bei jedem normalen Mess-Update neu gewählt.
+- Der Set-Wechsel ist **messungsgetrieben** und passiert nur im Update-Pfad (`/ibvs/matches`), nicht im Predict-Timer.
+- Normale Messungen aktualisieren nur die Zustandswerte der bereits aktiven IDs.
+
+Wie wird das Set gewählt?
+- Kandidaten sind die aktuell gültigen Roh-Matches (`ref_id`, `xy`, `sim`).
+- Doppelte `ref_id` werden zuerst aufgelöst (behalten wird der Match mit höherer `sim`).
+- Danach Auswahl bis `max_active_keypoints` mit:
+  - starker räumlicher Abdeckung (farthest-point-artige Verteilung),
+  - leichtem Score-Bias aus `sim`.
+- Set-Größe nach Auswahl: `N_active = min(max_active_keypoints, Anzahl eindeutiger Kandidaten)`.
+
+Wann ändert sich das aktive Set über die Messung?
+- Bei **Erstinitialisierung**:
+  - Bedingung: kein aktives Set + mindestens `min_init_keypoints`.
+- Bei **Relokalisierung**:
+  - Bedingung: beobachtete aktive Punkte `< min_update_keypoints`.
+  - Dann wird aus den aktuellen Roh-Matches ein neues aktives Set gewählt
+    (wenn diese mindestens `min_init_keypoints` liefern).
+- Bei **externer Relokalisierung**:
+  - z. B. neue Referenz (`force_relocalization()`), danach wird beim nächsten
+    ausreichenden Match-Frame neu gewählt.
+
+Explizite Reihenfolge pro eingehender `Matches`-Messung:
+- 1) Wenn es noch kein aktives Set gibt: Initialisierungsversuch aus dieser Messung.
+- 2) Wenn es ein aktives Set gibt: nur Matches mit aktiver `ref_id` zählen als beobachtet.
+- 3) Falls beobachtete aktive Punkte `>= min_update_keypoints`: normales partielles Update, Set bleibt gleich.
+- 4) Falls beobachtete aktive Punkte `< min_update_keypoints`: Relokalisierungsversuch aus allen aktuellen Roh-Matches.
+- 5) Relokalisierung nur erfolgreich bei `>= min_init_keypoints` (nach Deduplizierung), sonst kein Set-Wechsel.
+
+Wann ändert es sich **nicht**?
+- Wenn genügend aktive Punkte beobachtet werden (`>= min_update_keypoints`):
+  - dann bleibt die aktive ID-Liste gleich,
+  - nur Zustandswerte/Kovarianz werden geupdatet.
+- Auch wenn viele gute nicht aktive Matches verfügbar sind, werden diese in diesem Fall
+  nicht „on-the-fly“ ins Set gemischt.
+- Im reinen Predict-Betrieb (Timer ohne neue Matches) gibt es nie einen Set-Wechsel.
+
+Einfluss von Parameteränderungen zur Laufzeit:
+- Änderungen an `max_active_keypoints`, `min_init_keypoints`, `min_update_keypoints`
+  wirken sofort auf die Regeln.
+- Das bestehende aktive Set wird aber typischerweise erst bei der nächsten
+  Initialisierung/Relokalisierung neu zusammengesetzt.
+
+### 5.6.4 Unsicherheit `P` (wie sie geführt wird)
+
+Grundprinzip:
+- `P` ist die Kovarianzmatrix des Filterzustands.
+- Publiziert wird `trace(P)` auf `/ibvs/filter/uncertainty`.
+
+Initialisierung:
+- Start unsicher (`P` typischerweise groß, diagonal skaliert, z. B. `1000 * I`).
+- Bei `force_relocalization()` wird `initialized=false`; je nach Filtertyp wird `P` hochgesetzt.
+
+Prädiktion:
+- EKF: `P = F P F^T + Q` mit numerischer Jacobimatrix `F`.
+- UKF: `P` aus Sigma-Punkten rekonstruiert, dann `+ Q`.
+- ESKF: Fehlerkovarianz `P = F_dx P F_dx^T + Q`.
+- SKF: konstantes Geschwindigkeitsmodell mit Zustandsdimension `4N` (Position+Geschwindigkeit).
+
+Update:
+- Es wird nur auf beobachtete aktive Punkte aktualisiert (`H_obs` ist Auswahlmatrix).
+- Messrauschen `R` wirkt nur auf die beobachteten Messkomponenten.
+- Kovarianz wird klassisch mit Kalman-Gain reduziert (Form `P <- (I-KH)P`).
+
+Wichtige Beobachtung:
+- Wenn über längere Zeit nur Predict läuft (wenig/keine Updates), steigt Unsicherheit typischerweise.
+- Bei regelmäßigen erfolgreichen Updates sinkt `trace(P)` wieder.
+
+## 5.7 `ibvs_filter` - `filter_debug_node`
+Node: `ibvs_filter.filter_debug_node`
+
+Purpose:
+- Separate debug visualization process (decoupled from filter runtime).
+- Overlay reference/raw/filtered points and filter diagnostics.
+
+Subscriptions:
+- camera image topic (default `/camera/camera/color/image_raw/compressed`)
+- `/ibvs/reference/keypoints`
+- `/ibvs/matches` (raw)
+- `/ibvs/filtered_features` (filtered)
+- `/ibvs/filter/status`
+- `/ibvs/filter/uncertainty`
+- `/ibvs/filter/update_status`
+- `/ibvs/filter/update_count`
+- `/ibvs/filter/update_success_count`
+- `/ibvs/filter/active_count`
+
+Publications:
+- `/ibvs/filter_debug_image`
+
+## 5.8 `ibvs_control` - `ibvs_twist_controller`
 Node: `ibvs_control.ibvs_twist_controller_node`
 
 Purpose:
-- Compute IBVS Cartesian twist from `matches + reference`.
+- Compute IBVS Cartesian twist from `reference + selected feature source`.
 - Enforce safety gates and stop criteria.
 - Publish command twist for UR passthrough controller.
 
 Subscriptions:
-- `/ibvs/matches`
+- `/ibvs/matches` (raw)
+- `/ibvs/filtered_features` (filtered)
 - `/ibvs/reference/keypoints` (transient_local)
 - `/ibvs/init_done` (transient_local)
 
@@ -194,22 +408,24 @@ Publications:
 - `/ibvs/control/goal_reached` (transient_local)
 
 Current default control params (tuned):
-- `lambda_gain=0.12`
+- `lambda_gain=0.36`
 - `dls_damping=0.1`
+- `feature_source=filtered`
+- `filtered_fallback_to_raw=true`
 - `min_matches=60`
 - `error_stop_px=10.0`
 - `stop_hold_sec=0.8`
-- `max_linear_speed=0.004`
-- `max_angular_speed=0.05`
+- `max_linear_speed=0.012`
+- `max_angular_speed=0.15`
 - DOFs: `vx,vy,vz,wz=true`, `wx,wy=false`
-- axis signs: `vx=-1`, `vy=+1`, `vz=-1`, `wz=-1`
+- axis signs: `vx=-1`, `vy=+1`, `vz=0`, `wz=-1`
 - `enable_motion=false` by default (safety)
 
 Notes:
 - If camera mount or frame convention changes, axis signs likely need retuning.
 - Keep `enable_motion=false` until system state and controllers are confirmed.
 
-## 5.7 Session Tool - `ibvs_session_manager.py`
+## 5.9 Session Tool - `ibvs_session_manager.py`
 Script: `ros_ws/scripts/ibvs_session_manager.py`
 
 Purpose:
@@ -267,9 +483,27 @@ Typical flow in manager:
 - `2` (init capture)
 - `3` (tracking)
 
+Note:
+- `ibvs_filter/filter_node` and `ibvs_filter/filter_debug_node` are started separately (not by the manager menu).
+
 ## 6.4 Start controller manually
 ```bash
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_control ibvs_twist_controller'
+```
+
+Set feature source to filtered (default):
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_twist_controller_node feature_source filtered'
+```
+
+Set feature source to raw:
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_twist_controller_node feature_source raw'
+```
+
+Set min number of points:
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_twist_controller_node min_matches 20'
 ```
 
 Enable motion:
@@ -328,6 +562,16 @@ Match viz:
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_matching matches_viz'
 ```
 
+Filter:
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_node'
+```
+
+Filter debug:
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_debug_node'
+```
+
 RViz2:
 ```bash
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && rviz2'
@@ -340,11 +584,13 @@ docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && rviz2
 4. Manager: `6 -> 1 -> 2 -> 3`.
 5. Verify UR state (`robot_program_running=true`, `speed_scaling>0`).
 6. Start `ibvs_twist_controller` with `enable_motion=false`.
-7. Verify `cartesian_twist_passthrough_controller` is active.
-8. Set `enable_motion=true` and perform small pose perturbations.
-9. Observe:
+7. Optionally start `filter_node` and `filter_debug_node` if filtered IBVS should be used.
+8. Verify `cartesian_twist_passthrough_controller` is active.
+9. Set `enable_motion=true` and perform small pose perturbations.
+10. Observe:
    - `/cartesian_twist_passthrough_controller/cmd_vel`
-   - controller logs (`rms_px`, `matches`, `Goal reached`)
+   - `/ibvs/filtered_features`, `/ibvs/filter/active_count`
+   - controller logs (`rms_px`, `points`, `Goal reached`)
 
 ## 9) Troubleshooting
 
@@ -373,6 +619,7 @@ Check in order:
 - Reduce commanded speed.
 - Increase feature robustness (detector settings, ROI settings).
 - Raise `min_matches` for safety stop behavior.
+- If using `feature_source=filtered`, decide whether `filtered_fallback_to_raw` should be enabled.
 
 ## 10) Notes for New AI Chat / New Team Member
 When opening a new chat/session, include:
@@ -387,13 +634,18 @@ When opening a new chat/session, include:
 
 This minimizes re-debugging and avoids repeating controller activation/QoS issues.
 
-## 11) EKF Filter Tuning (ibvs_filter)
+## 11) Filter Tuning (ibvs_filter)
 
 Start filter node:
 
-EKF (r=1.4, q=2.0, gate=20.0, z=0.25):
+EKF example (`q=2.0, r=50.0, gate=20.0, z=0.25`, active set up to 40):
 ```bash
-docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_node --ros-args -p filter_type:=ekf -p q_noise:=2.0 -p r_noise:=50.0 -p gate_threshold:=20.0 -p z_depth:=0.25 -p debug:=true'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_node --ros-args -p filter_type:=ekf -p q_noise:=2.0 -p r_noise:=50.0 -p gate_threshold:=20.0 -p z_depth:=0.25 -p max_active_keypoints:=40 -p min_init_keypoints:=8 -p min_update_keypoints:=4'
+```
+
+Start debug overlay node:
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_debug_node'
 ```
 
 Live tuning (without restart):
@@ -402,7 +654,12 @@ docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node r_noise 80.0'
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node gate_threshold 20.0'
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node z_depth 0.45'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node force_relocalization true'
 ```
+
+Hinweis:
+- `force_relocalization=true` triggert eine manuelle Relokalisierung sofort.
+- Falls dein Param-Client identische Werte nicht erneut schreibt: für einen weiteren Trigger kurz auf `false` und danach wieder auf `true` setzen.
 
 Practical interpretation:
 - `q_noise` up: model less trusted, filter follows measurements more quickly.
@@ -410,14 +667,15 @@ Practical interpretation:
 - `r_noise` up: measurements less trusted, stronger smoothing.
 - `r_noise` down: more reactive to matches, but noisier.
 - `gate_threshold` up: fewer outlier rejects; down: stricter reject behavior.
+- `max_active_keypoints` up: more geometric coverage, but higher compute cost.
+- `min_init_keypoints` / `min_update_keypoints` too high: relocalization can happen too often.
 
 Recommended tuning sequence:
-1. Keep robot/camera static. Increase `r_noise` until jitter of yellow projected points is visibly reduced.
+1. Keep robot/camera static. Increase `r_noise` until jitter of yellow filtered points is visibly reduced.
 2. Move slowly in one axis. Increase `q_noise` until lag is acceptable without noisy oscillation.
 3. Introduce occasional bad matches (partial occlusion). Decrease `gate_threshold` until outliers are rejected, then back off slightly.
 4. Recheck with your normal motion speed.
 
-Useful gate references for 8D Mahalanobis gate:
-- ~15.5 (about 95% chi-square quantile, dof=8)
-- ~20.1 (about 99% chi-square quantile, dof=8)
-- ~26.1 (about 99.9% chi-square quantile, dof=8)
+Useful gate references:
+- The effective Mahalanobis dimension is `2 * (#observed active points)` and changes frame-to-frame.
+- Start around `20.0` and tune empirically for your scene/outlier rate.
