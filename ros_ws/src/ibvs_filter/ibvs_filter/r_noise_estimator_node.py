@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
+import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from ibvs_msgs.msg import Matches, Keypoints
-from ibvs_filter.core.base import BaseFilter
 
 """
 ros2 run ibvs_filter r_noise_estimator --ros-args \
@@ -27,6 +27,7 @@ class RNoiseEstimatorNode(Node):
         self.declare_parameter('inflation_factor', 1.5)
         self.declare_parameter('scalar_estimator', 'median')  # mean | median | p75 | max
         self.declare_parameter('output_yaml', '')
+        self.declare_parameter('ransac_reproj_threshold', 3.0)
 
         self.matches_topic = self.get_parameter('matches_topic').value
         self.reference_topic = self.get_parameter('reference_topic').value
@@ -35,10 +36,14 @@ class RNoiseEstimatorNode(Node):
         self.inflation_factor = float(self.get_parameter('inflation_factor').value)
         self.scalar_estimator = str(self.get_parameter('scalar_estimator').value).strip().lower()
         self.output_yaml = str(self.get_parameter('output_yaml').value).strip()
+        self.ransac_reproj_threshold = float(
+            self.get_parameter('ransac_reproj_threshold').value
+        )
 
         self.reference_keypoints_raw = None
-        self.measurement_model = BaseFilter(K=None)
-        self.samples = []
+        self.frame_count = 0
+        self.residual_x = []
+        self.residual_y = []
         self.done = False
 
         qos_ref = QoSProfile(
@@ -60,8 +65,9 @@ class RNoiseEstimatorNode(Node):
     def reference_callback(self, msg: Keypoints):
         new_ref = np.array(msg.xy, dtype=np.float64)
         if self.reference_keypoints_raw is None or len(new_ref) != len(self.reference_keypoints_raw):
-            self.samples.clear()
-            self.measurement_model.reset()
+            self.frame_count = 0
+            self.residual_x.clear()
+            self.residual_y.clear()
             self.get_logger().info("Reference received/changed: sample buffer reset.")
         self.reference_keypoints_raw = new_ref
 
@@ -92,26 +98,57 @@ class RNoiseEstimatorNode(Node):
 
         current_pixels = current_pixels[:, :valid_count]
         desired_pixels = desired_pixels[:, :valid_count]
-
-        z_k, _, _ = self.measurement_model._get_raw_measurement(current_pixels, desired_pixels)
-        if z_k is None:
+        if valid_count < 4:
             return
 
-        z = z_k.reshape(-1).astype(np.float64)
-        if z.shape[0] != 8 or not np.isfinite(z).all():
+        desired_pts = desired_pixels.T.astype(np.float32)
+        current_pts = current_pixels.T.astype(np.float32)
+
+        # Estimate global planar motion and use reprojection residual as measurement noise proxy.
+        H, inlier_mask = cv2.findHomography(
+            desired_pts,
+            current_pts,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=self.ransac_reproj_threshold,
+        )
+        if H is None or not np.isfinite(H).all():
             return
 
-        self.samples.append(z)
-        n = len(self.samples)
+        pred_pts = cv2.perspectiveTransform(desired_pts.reshape(-1, 1, 2), H).reshape(-1, 2)
+        residuals = current_pts - pred_pts
+        if not np.isfinite(residuals).all():
+            return
+
+        if inlier_mask is not None:
+            inlier_mask = inlier_mask.reshape(-1).astype(bool)
+            if np.count_nonzero(inlier_mask) < self.min_matches:
+                return
+            residuals = residuals[inlier_mask]
+            if residuals.shape[0] <= 0:
+                return
+
+        self.residual_x.extend(residuals[:, 0].astype(np.float64).tolist())
+        self.residual_y.extend(residuals[:, 1].astype(np.float64).tolist())
+        self.frame_count += 1
+        n = self.frame_count
         if n % 50 == 0 or n == self.sample_count:
-            self.get_logger().info(f"Collected {n}/{self.sample_count} valid samples.")
+            self.get_logger().info(
+                f"Collected {n}/{self.sample_count} valid frames "
+                f"({len(self.residual_x)} residual pairs)."
+            )
 
         if n >= self.sample_count:
             self._finalize()
 
     def _finalize(self):
-        Z = np.vstack(self.samples)
-        cov = np.cov(Z, rowvar=False, ddof=1) if Z.shape[0] > 1 else np.zeros((8, 8), dtype=np.float64)
+        if len(self.residual_x) <= 1 or len(self.residual_y) <= 1:
+            self.get_logger().warn("Not enough residual data collected for covariance estimate.")
+            self.done = True
+            return
+
+        rx = np.asarray(self.residual_x, dtype=np.float64)
+        ry = np.asarray(self.residual_y, dtype=np.float64)
+        cov = np.cov(np.vstack((rx, ry)), rowvar=True, ddof=1)
         diag = np.clip(np.diag(cov), 0.0, None)
 
         scalar_map = {
@@ -130,7 +167,7 @@ class RNoiseEstimatorNode(Node):
         recommended = max(base_scalar * self.inflation_factor, 1e-6)
 
         self.get_logger().info(
-            "Estimated R statistics (from z_k covariance diag):\n"
+            "Estimated R statistics (from homography reprojection residual covariance):\n"
             f"diag = {np.array2string(diag, precision=3, separator=', ')}\n"
             f"mean={scalar_map['mean']:.6f}, median={scalar_map['median']:.6f}, "
             f"p75={scalar_map['p75']:.6f}, max={scalar_map['max']:.6f}\n"

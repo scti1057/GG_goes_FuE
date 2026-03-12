@@ -19,6 +19,10 @@ class TcpPoseVelocityNode(Node):
         self.declare_parameter('publish_unstamped_twist', False)
         self.declare_parameter('use_message_stamp', True)
         self.declare_parameter('min_dt_sec', 1.0e-4)
+        self.declare_parameter('linear_deadband_mps', 0.003)
+        self.declare_parameter('angular_deadband_radps', 0.03)
+        self.declare_parameter('enable_ema', True)
+        self.declare_parameter('ema_alpha', 0.2)
 
         self.pose_topic = str(self.get_parameter('pose_topic').value)
         self.twist_stamped_topic = str(self.get_parameter('twist_stamped_topic').value)
@@ -28,11 +32,25 @@ class TcpPoseVelocityNode(Node):
         )
         self.use_message_stamp = bool(self.get_parameter('use_message_stamp').value)
         self.min_dt_sec = float(self.get_parameter('min_dt_sec').value)
+        self.linear_deadband_mps = float(self.get_parameter('linear_deadband_mps').value)
+        self.angular_deadband_radps = float(
+            self.get_parameter('angular_deadband_radps').value
+        )
+        self.enable_ema = bool(self.get_parameter('enable_ema').value)
+        self.ema_alpha = float(self.get_parameter('ema_alpha').value)
+
+        if not (0.0 < self.ema_alpha <= 1.0):
+            self.get_logger().warn(
+                f"Invalid ema_alpha={self.ema_alpha}. Falling back to 1.0 (no smoothing)."
+            )
+            self.ema_alpha = 1.0
 
         self.prev_position: Optional[np.ndarray] = None
         self.prev_orientation: Optional[np.ndarray] = None
         self.prev_time_sec: Optional[float] = None
         self.prev_frame_id: Optional[str] = None
+        self.filtered_linear_velocity: Optional[np.ndarray] = None
+        self.filtered_angular_velocity: Optional[np.ndarray] = None
 
         self.sub_pose = self.create_subscription(
             PoseStamped,
@@ -52,7 +70,10 @@ class TcpPoseVelocityNode(Node):
         self.get_logger().info(
             f"Sub pose={self.pose_topic} "
             f"Pub twist_stamped={self.twist_stamped_topic} "
-            f"use_message_stamp={self.use_message_stamp}"
+            f"use_message_stamp={self.use_message_stamp} "
+            f"deadband_lin={self.linear_deadband_mps:.4f} "
+            f"deadband_ang={self.angular_deadband_radps:.4f} "
+            f"ema={'on' if self.enable_ema else 'off'} alpha={self.ema_alpha:.2f}"
         )
         if self.publish_unstamped_twist:
             self.get_logger().info(f"Pub twist={self.twist_topic}")
@@ -70,6 +91,7 @@ class TcpPoseVelocityNode(Node):
             ],
             dtype=np.float64,
         )
+
         orientation = self._normalize_quaternion(
             np.array(
                 [
@@ -91,6 +113,8 @@ class TcpPoseVelocityNode(Node):
             self.prev_orientation = orientation
             self.prev_time_sec = now_sec
             self.prev_frame_id = msg.header.frame_id
+            self.filtered_linear_velocity = None
+            self.filtered_angular_velocity = None
             return
 
         dt = now_sec - self.prev_time_sec
@@ -110,6 +134,8 @@ class TcpPoseVelocityNode(Node):
             self.prev_orientation = orientation
             self.prev_time_sec = now_sec
             self.prev_frame_id = msg.header.frame_id
+            self.filtered_linear_velocity = None
+            self.filtered_angular_velocity = None
             return
 
         linear_velocity = (position - self.prev_position) / dt
@@ -117,6 +143,14 @@ class TcpPoseVelocityNode(Node):
             self.prev_orientation,
             orientation,
             dt,
+        )
+        linear_velocity, angular_velocity = self._apply_deadband(
+            linear_velocity,
+            angular_velocity,
+        )
+        linear_velocity, angular_velocity = self._apply_ema(
+            linear_velocity,
+            angular_velocity,
         )
 
         twist_stamped = TwistStamped()
@@ -198,6 +232,43 @@ class TcpPoseVelocityNode(Node):
 
         axis = delta_vector / delta_norm
         return axis * (angle / dt)
+
+    def _apply_deadband(
+        self,
+        linear_velocity: np.ndarray,
+        angular_velocity: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if np.linalg.norm(linear_velocity) < self.linear_deadband_mps:
+            linear_velocity = np.zeros(3, dtype=np.float64)
+        if np.linalg.norm(angular_velocity) < self.angular_deadband_radps:
+            angular_velocity = np.zeros(3, dtype=np.float64)
+        return linear_velocity, angular_velocity
+
+    def _apply_ema(
+        self,
+        linear_velocity: np.ndarray,
+        angular_velocity: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if not self.enable_ema:
+            return linear_velocity, angular_velocity
+
+        if self.filtered_linear_velocity is None:
+            self.filtered_linear_velocity = linear_velocity
+        else:
+            self.filtered_linear_velocity = (
+                self.ema_alpha * linear_velocity
+                + (1.0 - self.ema_alpha) * self.filtered_linear_velocity
+            )
+
+        if self.filtered_angular_velocity is None:
+            self.filtered_angular_velocity = angular_velocity
+        else:
+            self.filtered_angular_velocity = (
+                self.ema_alpha * angular_velocity
+                + (1.0 - self.ema_alpha) * self.filtered_angular_velocity
+            )
+
+        return self.filtered_linear_velocity, self.filtered_angular_velocity
 
 
 def main(args: Optional[Tuple[str, ...]] = None):
