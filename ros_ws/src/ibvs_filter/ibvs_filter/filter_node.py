@@ -430,6 +430,7 @@ class FilterNode(Node):
         num_matches = len(matches_msg.ref_id)
         current_pixels = np.zeros((2, num_matches))
         desired_pixels = np.zeros((2, num_matches))
+        matched_ids = []
         
         valid_count = 0
         for i, ref_idx in enumerate(matches_msg.ref_id):
@@ -438,6 +439,7 @@ class FilterNode(Node):
                 current_pixels[1, valid_count] = matches_msg.xy[i * 2 + 1]
                 desired_pixels[0, valid_count] = self.reference_keypoints_raw[ref_idx * 2]
                 desired_pixels[1, valid_count] = self.reference_keypoints_raw[ref_idx * 2 + 1]
+                matched_ids.append(ref_idx)
                 valid_count += 1
 
         current_pixels = current_pixels[:, :valid_count]
@@ -450,7 +452,7 @@ class FilterNode(Node):
         # Update ausführen (nur wenn genug Matches da sind)
         if valid_count >= 4:
             with self.lock:
-                self.filter.update(current_pixels, desired_pixels)
+                self.filter.update(current_pixels, desired_pixels, ref_ids=matched_ids)
 
     def image_callback(self, img_msg: Any):
         """3. Debug Schritt: Zeichnet Overlay, wenn ein Bild kommt."""

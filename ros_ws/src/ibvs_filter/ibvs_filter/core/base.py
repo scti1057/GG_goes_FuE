@@ -127,4 +127,4 @@ class BaseFilter:
         ], dtype=np.float64)
 
     def predict(self, v_ee, Z_est, dt): raise NotImplementedError
-    def update(self, current_pixels, desired_pixels): raise NotImplementedError
+    def update(self, current_pixels, desired_pixels, ref_ids=None): raise NotImplementedError
