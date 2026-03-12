@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'filter_node = ibvs_filter.filter_node:main',
+            'filter_debug_node = ibvs_filter.filter_debug_node:main',
             'r_noise_estimator = ibvs_filter.r_noise_estimator_node:main',
             'tcp_pose_velocity_node = ibvs_filter.tcp_pose_velocity_node:main',
         ],
