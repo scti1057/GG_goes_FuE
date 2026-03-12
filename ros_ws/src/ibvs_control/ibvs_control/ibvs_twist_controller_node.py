@@ -13,19 +13,24 @@ from rclpy.qos import (
 )
 from std_msgs.msg import Bool
 
-from ibvs_msgs.msg import Keypoints, Matches, ProxyCorners
+from ibvs_msgs.msg import Keypoints, Matches
 
 
 class IbvsTwistControllerNode(Node):
     def __init__(self):
         super().__init__('ibvs_twist_controller_node')
 
+        # Legacy alias: historically this was the only matches topic (raw).
         self.declare_parameter('matches_topic', '/ibvs/matches')
+        self.declare_parameter('raw_matches_topic', self.get_parameter('matches_topic').value)
+        self.declare_parameter('filtered_matches_topic', '/ibvs/filtered_features')
+        self.declare_parameter('feature_source', 'filtered')  # filtered | raw
+        self.declare_parameter('filtered_fallback_to_raw', True)
+
         self.declare_parameter('reference_topic', '/ibvs/reference/keypoints')
         self.declare_parameter('init_done_topic', '/ibvs/init_done')
         self.declare_parameter('twist_topic', '/cartesian_twist_passthrough_controller/cmd_vel')
         self.declare_parameter('goal_reached_topic', '/ibvs/control/goal_reached')
-        self.declare_parameter('proxy_corners_topic', '/ibvs/filter/proxy_corners')
 
         # Camera intrinsics for pixel -> normalized conversion.
         self.declare_parameter('fx', 615.0)
@@ -42,16 +47,13 @@ class IbvsTwistControllerNode(Node):
         # Safety and stop criteria.
         self.declare_parameter('enable_motion', False)
         self.declare_parameter('require_init_done', True)
-        self.declare_parameter('min_matches', 60)
+        self.declare_parameter('min_matches', 5)
         self.declare_parameter('match_timeout_sec', 0.25)
-        self.declare_parameter('proxy_timeout_sec', 0.25)
         self.declare_parameter('error_stop_px', 10.0)
         self.declare_parameter('stop_hold_sec', 0.8)
         self.declare_parameter('max_linear_speed', 0.012)
         self.declare_parameter('max_angular_speed', 0.15)
         self.declare_parameter('log_period_sec', 1.0)
-        self.declare_parameter('use_proxy_corners', True)
-        self.declare_parameter('proxy_fallback_to_matches', True)
 
         # Allowed DOFs: default x,y,z + yaw.
         self.declare_parameter('allow_vx', True)
@@ -64,18 +66,21 @@ class IbvsTwistControllerNode(Node):
         # Axis sign tuning for camera-to-tcp frame convention.
         self.declare_parameter('axis_sign_vx', -1.0)
         self.declare_parameter('axis_sign_vy', 1.0)
-        self.declare_parameter('axis_sign_vz', 0) #-1.0
+        self.declare_parameter('axis_sign_vz', 0)
         self.declare_parameter('axis_sign_wx', 1.0)
         self.declare_parameter('axis_sign_wy', 1.0)
         self.declare_parameter('axis_sign_wz', -1.0)
 
         self.ref_xy: Optional[np.ndarray] = None
-        self.last_ref_id: Optional[np.ndarray] = None
-        self.last_cur_xy: Optional[np.ndarray] = None
-        self.last_matches_time_sec: float = -1.0
-        self.last_proxy_ref_xy: Optional[np.ndarray] = None
-        self.last_proxy_cur_xy: Optional[np.ndarray] = None
-        self.last_proxy_time_sec: float = -1.0
+
+        self.last_raw_ref_id: Optional[np.ndarray] = None
+        self.last_raw_cur_xy: Optional[np.ndarray] = None
+        self.last_raw_time_sec: float = -1.0
+
+        self.last_filtered_ref_id: Optional[np.ndarray] = None
+        self.last_filtered_cur_xy: Optional[np.ndarray] = None
+        self.last_filtered_time_sec: float = -1.0
+
         self.init_done: bool = False
         self.goal_reached: bool = False
         self.goal_hold_start_sec: Optional[float] = None
@@ -100,10 +105,16 @@ class IbvsTwistControllerNode(Node):
             self.on_reference,
             ref_qos,
         )
-        self.sub_matches = self.create_subscription(
+        self.sub_raw_matches = self.create_subscription(
             Matches,
-            self.get_parameter('matches_topic').value,
-            self.on_matches,
+            self.get_parameter('raw_matches_topic').value,
+            self.on_raw_matches,
+            qos_profile_sensor_data,
+        )
+        self.sub_filtered_matches = self.create_subscription(
+            Matches,
+            self.get_parameter('filtered_matches_topic').value,
+            self.on_filtered_matches,
             qos_profile_sensor_data,
         )
         self.sub_init_done = self.create_subscription(
@@ -111,12 +122,6 @@ class IbvsTwistControllerNode(Node):
             self.get_parameter('init_done_topic').value,
             self.on_init_done,
             init_qos,
-        )
-        self.sub_proxy = self.create_subscription(
-            ProxyCorners,
-            self.get_parameter('proxy_corners_topic').value,
-            self.on_proxy_corners,
-            qos_profile_sensor_data,
         )
 
         self.twist_pub = self.create_publisher(
@@ -137,23 +142,12 @@ class IbvsTwistControllerNode(Node):
         self.publish_goal(False, force=True)
 
         self.get_logger().info(
-            f"Sub matches={self.get_parameter('matches_topic').value} "
-            f"Sub ref={self.get_parameter('reference_topic').value}"
+            f"Sub raw={self.get_parameter('raw_matches_topic').value} "
+            f"Sub filtered={self.get_parameter('filtered_matches_topic').value} "
+            f"feature_source={self.get_parameter('feature_source').value}"
         )
-        self.get_logger().info(
-            f"Sub proxy={self.get_parameter('proxy_corners_topic').value} "
-            f"use_proxy_corners={self.get_parameter('use_proxy_corners').value}"
-        )
+        self.get_logger().info(f"Sub ref={self.get_parameter('reference_topic').value}")
         self.get_logger().info(f"Pub twist={self.get_parameter('twist_topic').value}")
-        self.get_logger().info(
-            "DOF mask: "
-            f"vx={self.get_parameter('allow_vx').value} "
-            f"vy={self.get_parameter('allow_vy').value} "
-            f"vz={self.get_parameter('allow_vz').value} "
-            f"wx={self.get_parameter('allow_wx').value} "
-            f"wy={self.get_parameter('allow_wy').value} "
-            f"wz={self.get_parameter('allow_wz').value}"
-        )
 
     def now_sec(self) -> float:
         return float(self.get_clock().now().nanoseconds) * 1e-9
@@ -167,45 +161,43 @@ class IbvsTwistControllerNode(Node):
             self.get_logger().warn('Reference xy length not even; ignoring.')
             return
         self.ref_xy = xy.reshape(-1, 2)
-        self.get_logger().info(f"Reference cached for control: K={self.ref_xy.shape[0]}")
+        self.get_logger().info(f'Reference cached for control: K={self.ref_xy.shape[0]}')
 
-    def on_matches(self, msg: Matches):
+    def _cache_matches(self, msg: Matches):
         if self.ref_xy is None:
-            return
+            return None, None
 
         xy = np.asarray(msg.xy, dtype=np.float32)
         if xy.size % 2 != 0:
-            self.get_logger().warn('Matches xy length not even; skipping frame.')
-            return
+            return None, None
         cur_xy = xy.reshape(-1, 2)
         n_pairs = min(cur_xy.shape[0], len(msg.ref_id))
         if n_pairs <= 0:
-            return
+            return None, None
 
         ref_id = np.asarray(msg.ref_id[:n_pairs], dtype=np.int64)
         cur_xy = cur_xy[:n_pairs]
-
         valid = (ref_id >= 0) & (ref_id < self.ref_xy.shape[0])
         if not np.any(valid):
+            return None, None
+
+        return ref_id[valid], cur_xy[valid]
+
+    def on_raw_matches(self, msg: Matches):
+        ref_id, cur_xy = self._cache_matches(msg)
+        if ref_id is None:
             return
+        self.last_raw_ref_id = ref_id
+        self.last_raw_cur_xy = cur_xy
+        self.last_raw_time_sec = self.now_sec()
 
-        self.last_ref_id = ref_id[valid]
-        self.last_cur_xy = cur_xy[valid]
-        self.last_matches_time_sec = self.now_sec()
-
-    def on_proxy_corners(self, msg: ProxyCorners):
-        if not bool(msg.valid):
+    def on_filtered_matches(self, msg: Matches):
+        ref_id, cur_xy = self._cache_matches(msg)
+        if ref_id is None:
             return
-
-        ref_xy = np.asarray(msg.ref_xy, dtype=np.float32)
-        cur_xy = np.asarray(msg.cur_xy, dtype=np.float32)
-        if ref_xy.size != 8 or cur_xy.size != 8:
-            self.get_logger().warn('Proxy corners must contain exactly 4 points (8 floats).')
-            return
-
-        self.last_proxy_ref_xy = ref_xy.reshape(4, 2)
-        self.last_proxy_cur_xy = cur_xy.reshape(4, 2)
-        self.last_proxy_time_sec = self.now_sec()
+        self.last_filtered_ref_id = ref_id
+        self.last_filtered_cur_xy = cur_xy
+        self.last_filtered_time_sec = self.now_sec()
 
     def _active_mask(self) -> np.ndarray:
         return np.array([
@@ -291,7 +283,6 @@ class IbvsTwistControllerNode(Node):
         out[0:3] = np.clip(out[0:3], -max_lin, max_lin)
         out[3:6] = np.clip(out[3:6], -max_ang, max_ang)
 
-        # Hard enforce disabled DOFs, even if signs/params were changed at runtime.
         active = self._active_mask()
         out[~active] = 0.0
         return out
@@ -326,6 +317,37 @@ class IbvsTwistControllerNode(Node):
         self.last_log_sec = now
         self.get_logger().info(text)
 
+    def _select_feature_set(self, now: float, timeout_sec: float):
+        source_pref = str(self.get_parameter('feature_source').value).strip().lower()
+        if source_pref not in ('filtered', 'raw'):
+            source_pref = 'filtered'
+
+        fallback = bool(self.get_parameter('filtered_fallback_to_raw').value)
+
+        filtered_ready = (
+            self.last_filtered_ref_id is not None
+            and self.last_filtered_cur_xy is not None
+            and self.last_filtered_time_sec > 0.0
+            and (now - self.last_filtered_time_sec) <= timeout_sec
+        )
+        raw_ready = (
+            self.last_raw_ref_id is not None
+            and self.last_raw_cur_xy is not None
+            and self.last_raw_time_sec > 0.0
+            and (now - self.last_raw_time_sec) <= timeout_sec
+        )
+
+        if source_pref == 'filtered':
+            if filtered_ready:
+                return 'filtered', self.last_filtered_ref_id, self.last_filtered_cur_xy
+            if fallback and raw_ready:
+                return 'raw(fallback)', self.last_raw_ref_id, self.last_raw_cur_xy
+            return None, None, None
+
+        if raw_ready:
+            return 'raw', self.last_raw_ref_id, self.last_raw_cur_xy
+        return None, None, None
+
     def on_timer(self):
         now = self.now_sec()
 
@@ -341,85 +363,39 @@ class IbvsTwistControllerNode(Node):
                 self.maybe_log_status('Waiting for /ibvs/init_done=true before moving.')
             return
 
-        cur_xy = None
-        des_xy = None
-        source = 'matches'
+        if self.ref_xy is None:
+            self.goal_hold_start_sec = None
+            self.publish_goal(False)
+            self.publish_zero_twist()
+            self.maybe_log_status('No reference keypoints cached yet.')
+            return
 
-        use_proxy = bool(self.get_parameter('use_proxy_corners').value)
-        fallback_to_matches = bool(self.get_parameter('proxy_fallback_to_matches').value)
-        if use_proxy:
-            proxy_timeout_sec = float(self.get_parameter('proxy_timeout_sec').value)
-            proxy_ready = self.last_proxy_ref_xy is not None and self.last_proxy_cur_xy is not None
-            proxy_fresh = self.last_proxy_time_sec > 0.0 and (now - self.last_proxy_time_sec) <= proxy_timeout_sec
-            if proxy_ready and proxy_fresh:
-                cur_xy = self.last_proxy_cur_xy
-                des_xy = self.last_proxy_ref_xy
-                source = 'proxy'
-                self.maybe_log_status('Proxy mode active.')
-            elif not fallback_to_matches:
-                self.goal_hold_start_sec = None
-                self.publish_goal(False)
-                self.publish_zero_twist()
-                self.maybe_log_status('Proxy mode active, but proxy corners unavailable or stale.')
-                return
-            else:
-                self.maybe_log_status('Proxy unavailable/stale, fallback to matches.')
+        timeout_sec = float(self.get_parameter('match_timeout_sec').value)
+        source, ref_id, cur_xy = self._select_feature_set(now, timeout_sec)
+        if source is None:
+            self.goal_hold_start_sec = None
+            self.publish_goal(False)
+            self.publish_zero_twist()
+            self.maybe_log_status('No fresh feature set available (selected source stale/unavailable).')
+            return
 
-        if cur_xy is None:
-            if self.ref_xy is None:
-                self.goal_hold_start_sec = None
-                self.publish_goal(False)
-                self.publish_zero_twist()
-                self.maybe_log_status('No reference keypoints cached yet.')
-                return
+        des_xy = self.ref_xy[ref_id]
+        if cur_xy.shape[0] == 0:
+            self.goal_hold_start_sec = None
+            self.publish_goal(False)
+            self.publish_zero_twist()
+            self.maybe_log_status('Selected feature set is empty.')
+            return
 
-            if self.last_ref_id is None or self.last_cur_xy is None:
-                self.goal_hold_start_sec = None
-                self.publish_goal(False)
-                self.publish_zero_twist()
-                self.maybe_log_status('No matches received yet.')
-                return
-
-            timeout_sec = float(self.get_parameter('match_timeout_sec').value)
-            if self.last_matches_time_sec <= 0.0 or (now - self.last_matches_time_sec) > timeout_sec:
-                self.goal_hold_start_sec = None
-                self.publish_goal(False)
-                self.publish_zero_twist()
-                self.maybe_log_status('Match timeout, command set to zero.')
-                return
-
-            cur_xy = self.last_cur_xy
-            des_xy = self.ref_xy[self.last_ref_id]
-            if cur_xy.shape[0] == 0:
-                self.goal_hold_start_sec = None
-                self.publish_goal(False)
-                self.publish_zero_twist()
-                self.maybe_log_status('Matches empty after filtering.')
-                return
-
-            min_matches = int(self.get_parameter('min_matches').value)
-            if cur_xy.shape[0] < min_matches:
-                self.goal_hold_start_sec = None
-                self.publish_goal(False)
-                self.publish_zero_twist()
-                self.maybe_log_status(
-                    f'Not enough matches: {cur_xy.shape[0]} < min_matches={min_matches}.'
-                )
-                return
-        else:
-            if cur_xy.shape[0] != 4 or des_xy.shape[0] != 4:
-                self.goal_hold_start_sec = None
-                self.publish_goal(False)
-                self.publish_zero_twist()
-                self.maybe_log_status('Proxy mode requires exactly 4 corners.')
-                return
-
-            if not (np.isfinite(cur_xy).all() and np.isfinite(des_xy).all()):
-                self.goal_hold_start_sec = None
-                self.publish_goal(False)
-                self.publish_zero_twist()
-                self.maybe_log_status('Proxy corners contain non-finite values.')
-                return
+        min_matches = int(self.get_parameter('min_matches').value)
+        if cur_xy.shape[0] < min_matches:
+            self.goal_hold_start_sec = None
+            self.publish_goal(False)
+            self.publish_zero_twist()
+            self.maybe_log_status(
+                f'Not enough features: {cur_xy.shape[0]} < min_matches={min_matches}.'
+            )
+            return
 
         err_px = cur_xy - des_xy
         rms_px = float(np.sqrt(np.mean(np.sum(err_px * err_px, axis=1))))
