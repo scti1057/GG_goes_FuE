@@ -24,13 +24,13 @@ class FilterNode(Node):
         super().__init__('ibvs_filter_node')
 
         self.declare_parameter('filter_type', 'ekf')
-        self.declare_parameter('q_noise', 1.0)
-        self.declare_parameter('r_noise', 50.0)
+        self.declare_parameter('q_noise', 2.0)
+        self.declare_parameter('r_noise', 1.1)
         self.declare_parameter('z_depth', 0.25)
         self.declare_parameter('gate_threshold', 20.0)
-        self.declare_parameter('predict_rate', 250.0)
+        self.declare_parameter('predict_rate', 120.0)
 
-        self.declare_parameter('max_active_keypoints', 40)
+        self.declare_parameter('max_active_keypoints', 10)
         self.declare_parameter('min_init_keypoints', 8)
         self.declare_parameter('min_update_keypoints', 4)
         self.declare_parameter('force_relocalization', False)
@@ -271,10 +271,10 @@ class FilterNode(Node):
                     )
                 next_min_init = int(p.value)
             elif p.name == 'min_update_keypoints':
-                if p.value < 1:
+                if p.value < 0:
                     return SetParametersResult(
                         successful=False,
-                        reason='min_update_keypoints must be >= 1',
+                        reason='min_update_keypoints must be >= 0',
                     )
                 next_min_update = int(p.value)
             elif p.name == 'force_relocalization':
@@ -434,6 +434,32 @@ class FilterNode(Node):
             active_count_msg.data = 0
         self.pub_active_count.publish(active_count_msg)
 
+    def _extract_active_position_uncertainty(self, active_ref_ids: np.ndarray) -> np.ndarray:
+        """Return per-active-keypoint position sigma in pixels from the filter covariance."""
+        n = int(active_ref_ids.size)
+        if n <= 0:
+            return np.zeros((0,), dtype=np.float32)
+        if self.filter is None or (not hasattr(self.filter, 'P')):
+            return np.zeros((n,), dtype=np.float32)
+
+        p_mat = np.asarray(getattr(self.filter, 'P'), dtype=np.float64)
+        if p_mat.ndim != 2:
+            return np.zeros((n,), dtype=np.float32)
+
+        sigma_px = np.zeros((n,), dtype=np.float32)
+        for slot in range(n):
+            i0 = 2 * slot
+            i1 = i0 + 2
+            if i1 <= p_mat.shape[0] and i1 <= p_mat.shape[1]:
+                p_block = p_mat[i0:i1, i0:i1]
+                tr = float(np.trace(p_block))
+                if not np.isfinite(tr):
+                    tr = 0.0
+                sigma_px[slot] = float(np.sqrt(max(0.0, tr)))
+            else:
+                sigma_px[slot] = 0.0
+        return sigma_px
+
     def timer_callback(self):
         if self.filter is None or self.reference_keypoints_raw is None:
             return
@@ -445,7 +471,9 @@ class FilterNode(Node):
             self.filter.predict(v_ee, self.z_depth, dt)
             active_ref_ids = self.filter.get_active_ref_ids()
             filtered_current_pts = self.filter.get_active_filtered_points()
+            active_sigma_px = self._extract_active_position_uncertainty(active_ref_ids)
             p_trace = float(np.trace(self.filter.P)) if hasattr(self.filter, 'P') else 0.0
+            # print(f"P: {self.filter.P}, trace: {np.trace(self.filter.P):.2f}")
 
         out_msg = Matches()
         out_msg.header.stamp = self.get_clock().now().to_msg()
@@ -457,10 +485,11 @@ class FilterNode(Node):
             out_msg.xy = (
                 filtered_current_pts[:, :num_pts].T.astype(np.float32).flatten().tolist()
             )
+            out_msg.sim = active_sigma_px[:num_pts].astype(np.float32).tolist()
         else:
             out_msg.ref_id = []
             out_msg.xy = []
-        out_msg.sim = [1.0] * num_pts
+            out_msg.sim = []
 
         self.pub_filtered_points.publish(out_msg)
         self._publish_filter_meta(p_trace)

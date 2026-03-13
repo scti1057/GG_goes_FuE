@@ -39,7 +39,7 @@ class BaseFilter:
     ):
         self.max_active_keypoints = max(4, int(max_active_keypoints))
         self.min_init_keypoints = max(4, int(min_init_keypoints))
-        self.min_update_keypoints = max(1, int(min_update_keypoints))
+        self.min_update_keypoints = max(0, int(min_update_keypoints))
         self.min_init_keypoints = min(
             self.min_init_keypoints, self.max_active_keypoints
         )

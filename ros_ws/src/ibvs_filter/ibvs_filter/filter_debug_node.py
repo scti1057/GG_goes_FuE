@@ -319,12 +319,12 @@ class FilterDebugNode(Node):
         x_txt, y_txt = 15, 25
         line_h = 20
 
-        cv2.putText(cv_img, 'Filter Debug (separate node)', (x_txt, y_txt), font, 0.5, (255, 255, 255), 1)
+        # cv2.putText(cv_img, 'Filter Debug (separate node)', (x_txt, y_txt), font, 0.5, (255, 255, 255), 1)
+        # y_txt += line_h
+        cv2.putText(cv_img, f'Filter: {filter_name} | Status: {status_name}', (x_txt, y_txt), font, 0.5, (255, 255, 255), 1)
         y_txt += line_h
-        cv2.putText(cv_img, f'Filter: {filter_name}', (x_txt, y_txt), font, 0.5, (255, 255, 255), 1)
-        y_txt += line_h
-        cv2.putText(cv_img, f'Status: {status_name}', (x_txt, y_txt), font, 0.5, (255, 255, 255), 1)
-        y_txt += line_h
+        # cv2.putText(cv_img, f'Status: {status_name}', (x_txt, y_txt), font, 0.5, (255, 255, 255), 1)
+        # y_txt += line_h
         cv2.putText(
             cv_img,
             f'Unsicherheit (trace P): {filter_uncertainty:.2f}',

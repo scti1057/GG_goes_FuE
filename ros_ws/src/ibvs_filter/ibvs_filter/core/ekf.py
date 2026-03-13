@@ -55,7 +55,7 @@ class ExtendedKalmanFilter(BaseFilter):
         pts_pixel = state_2n.reshape(n, 2).T
         pts_norm = self.ibvs_math.pixel2normalized(pts_pixel)
 
-        debug_prints_enabled = True
+        debug_prints_enabled = False
 
         if debug_prints_enabled:
             print("-"*30)
