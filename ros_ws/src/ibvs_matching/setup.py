@@ -27,6 +27,7 @@ setup(
             'matches_viz = ibvs_matching.matches_viz_node:main',
 
             'descriptor_matcher = ibvs_matching.descriptor_matcher_node:main',
+            'local_rescue_debug = ibvs_matching.local_rescue_debug_node:main',
 
         ],
     },
