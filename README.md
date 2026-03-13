@@ -557,6 +557,31 @@ Matcher:
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_matching descriptor_matcher --ros-args -p match_threshold:=0.85 -p mutual_check:=true'
 ```
 
+Matcher mode switch (benchmarking):
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /descriptor_matcher_node local_rescue_mode off'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /descriptor_matcher_node local_rescue_mode shadow'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /descriptor_matcher_node local_rescue_mode active'
+```
+
+Local rescue tuning:
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /descriptor_matcher_node sim_floor 0.60'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /descriptor_matcher_node adaptive_radius_min_px 8.0'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /descriptor_matcher_node adaptive_radius_max_px 24.0'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /descriptor_matcher_node adaptive_sim_threshold_min 0.68'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /descriptor_matcher_node adaptive_sim_threshold_max 0.82'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /descriptor_matcher_node kp_sigma_low_px 1.5'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /descriptor_matcher_node kp_sigma_high_px 10.0'
+```
+
+Local rescue debug image (separate node):
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_matching local_rescue_debug'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /local_rescue_debug_node focus_ref_id 5'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /local_rescue_debug_node sim_floor 0.60'
+```
+
 Match viz:
 ```bash
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_matching matches_viz'
@@ -685,3 +710,302 @@ Recommended tuning sequence:
 Useful gate references:
 - The effective Mahalanobis dimension is `2 * (#observed active points)` and changes frame-to-frame.
 - Start around `20.0` and tune empirically for your scene/outlier rate.
+
+## 12) Local Rescue Matching (Detailed Theory + What Was Implemented)
+
+This chapter documents the complete local rescue extension added in this project iteration:
+- Runtime mode switching (`off|shadow|active`) in the matcher.
+- Uncertainty-aware local rescue around filter predictions.
+- A separate debug node with live parameter synchronization from the matcher node.
+- Benchmark and analysis scripts for reproducible comparison.
+
+### 12.1 Problem statement
+
+In the baseline pipeline, descriptor matching is global:
+- current keypoint descriptors are matched against reference descriptors.
+- a global similarity threshold and optional mutual check decide accepted pairs.
+
+Failure mode:
+- when a keypoint is temporarily hard to detect/match (blur, occlusion, motion), global matching can drop it.
+- however, the filter still predicts where the keypoint should be.
+
+Goal of local rescue:
+- use filter prediction as a strong spatial prior.
+- perform local candidate selection around predicted position.
+- apply adaptive (uncertainty-dependent) gates and scoring.
+- recover plausible matches without destabilizing the system.
+
+### 12.2 Data flow and node responsibilities
+
+#### Existing path
+- `keypoint_node` publishes `/ibvs/keypoints` (xy + descriptors).
+- `descriptor_matcher_node` publishes `/ibvs/matches`.
+- `filter_node` consumes `/ibvs/matches`, predicts + updates active set.
+- `ibvs_twist_controller` consumes raw/filtered features.
+
+#### Added/extended path
+- `filter_node` now publishes per-active-keypoint uncertainty on `/ibvs/filtered_features.sim` (see 12.3).
+- `descriptor_matcher_node` subscribes to `/ibvs/filtered_features` and can run local rescue.
+- `local_rescue_debug_node` visualizes rescue logic and can synchronize parameters from `/descriptor_matcher_node`.
+
+### 12.3 Per-keypoint uncertainty (from existing covariance, no extra filter instances)
+
+Important:
+- We do **not** run a separate Kalman filter per keypoint.
+- We reuse the existing covariance matrix `P` of the active state.
+
+For active slot `i` (position states `x_i, y_i`):
+- extract 2x2 block
+  - `P_i = P[2i:2i+2, 2i:2i+2]`
+- compute pixel uncertainty scalar
+  - `sigma_i = sqrt(trace(P_i))`
+
+This `sigma_i` is published in `/ibvs/filtered_features.sim` aligned with `ref_id` and `xy` order.
+
+Practical meaning:
+- small `sigma_i`: filter prediction is confident for this keypoint.
+- large `sigma_i`: prediction is uncertain.
+
+### 12.4 Rescue mode semantics (`local_rescue_mode`)
+
+In `descriptor_matcher_node`:
+- `off`: local rescue disabled (baseline behavior).
+- `shadow`: local rescue is computed and logged, but not injected into output matches.
+- `active`: local rescue is computed and accepted rescue matches are appended to output.
+
+This mode is runtime-switchable:
+```bash
+ros2 param set /descriptor_matcher_node local_rescue_mode off
+ros2 param set /descriptor_matcher_node local_rescue_mode shadow
+ros2 param set /descriptor_matcher_node local_rescue_mode active
+```
+
+### 12.5 Two-stage decision logic
+
+#### Stage A: global matching (baseline)
+- same as before (global similarity + optional mutual check).
+- accepted global pairs are fixed first.
+
+#### Stage B: local rescue (only for not-yet-assigned refs)
+- iterate active filtered predictions `(ref_id, pred_xy, sigma_px)`.
+- skip refs already globally matched.
+- search candidates in local radius around `pred_xy`.
+- apply hard gates.
+- compute combined score.
+- apply ambiguity test (best must be clearly better than second).
+- if accepted and mode=`active`, append rescue pair.
+
+### 12.6 Hard gates and adaptive gates
+
+#### Hard floor
+- `sim >= sim_floor` (absolute minimum descriptor quality).
+
+#### Adaptive gates (if `use_adaptive_gates=true`)
+
+First normalize uncertainty:
+- raw normalization:
+  - `u_raw = (sigma_px - kp_sigma_low_px) / (kp_sigma_high_px - kp_sigma_low_px)`
+- clipped:
+  - `u = clip(u_raw, 0, 1)`
+
+Interpretation:
+- `u ~ 0`: high confidence in filter position.
+- `u ~ 1`: low confidence in filter position.
+
+Then compute effective gates:
+- `radius_eff = r_min + u * (r_max - r_min)`
+- `sim_thr_eff = t_min + u * (t_max - t_min)`
+- and enforce `sim_thr_eff >= sim_floor`.
+
+Effect:
+- higher uncertainty => larger search radius and stricter similarity threshold.
+- lower uncertainty => tighter spatial gate and lower required similarity.
+
+If adaptive gates are disabled:
+- fixed `local_search_radius_px`, `local_match_threshold` are used.
+
+### 12.7 Combined score (position vs descriptor weighting)
+
+For valid local candidates:
+- distance to prediction: `d`
+- similarity: `sim`
+
+Normalize similarity to `[0,1]` above floor:
+- `sim_norm = clip((sim - sim_floor)/(1 - sim_floor), 0, 1)`
+
+Position score:
+- `pos_score = exp(-0.5 * (d / sigma_pos)^2)`
+- with `sigma_pos = max(1.0, 0.5 * radius_eff)`
+
+Uncertainty-driven weights:
+- `w_pos = 1 - u`
+- `w_sim = u`
+
+Combined score:
+- `score = pos_score^(w_pos) * sim_norm^(w_sim)`
+
+Desired behavior:
+- low uncertainty (`u` small): position dominates.
+- high uncertainty (`u` large): descriptor quality dominates.
+
+### 12.8 Ambiguity rejection (`AMB`)
+
+Ambiguity criterion compares top two candidates by combined score:
+- `gap = score_best - score_second`
+- `ratio = score_best / max(score_second, eps)`
+
+Rescue is rejected if:
+- `gap < local_ambiguity_min_score_gap` OR
+- `ratio < local_ambiguity_min_score_ratio`
+
+Meaning of `AMB`:
+- best candidate is not sufficiently distinct.
+- result is considered unstable and not rescued.
+
+### 12.9 Debug image (separate node)
+
+Node:
+- `ibvs_matching.local_rescue_debug_node`
+
+Main overlays:
+- yellow cross: filter prediction.
+- yellow circle: effective search radius.
+- candidate dots: local candidates.
+- text per candidate:
+  - `s=...` similarity
+  - `q=...` combined score
+- label near best candidate:
+  - `sig` (per-keypoint uncertainty)
+  - `u` normalized uncertainty
+  - `r` effective radius
+  - `thr` effective similarity threshold
+  - `best=sim/score`
+  - `OK` or `AMB`
+
+Status messages:
+- `no candidates`: nothing in local radius.
+- `all fail gates`: candidates found, but hard/adaptive gates failed.
+- `stale=true`: filtered predictions too old (`filtered_timeout_sec`).
+
+### 12.10 Parameter synchronization (debug node <- matcher node)
+
+Implemented with ROS2 `AsyncParameterClient`:
+- debug node periodically reads rescue-relevant parameters from `/descriptor_matcher_node`.
+- avoids mismatch between actual matcher logic and debug visualization.
+
+Debug sync parameters:
+- `sync_matcher_params` (default `true`)
+- `matcher_node_name` (default `/descriptor_matcher_node`)
+- `matcher_param_poll_hz` (default `2.0`)
+
+Synchronized parameter set:
+- `sim_floor`
+- `use_adaptive_gates`
+- `adaptive_radius_min_px`, `adaptive_radius_max_px`
+- `adaptive_sim_threshold_min`, `adaptive_sim_threshold_max`
+- `kp_sigma_low_px`, `kp_sigma_high_px`
+- `local_ambiguity_min_score_gap`, `local_ambiguity_min_score_ratio`
+- plus fixed-gate fallback params.
+
+### 12.11 Why `u` can appear above 1.0 in logs
+
+`u_raw` can exceed `1.0` when `sigma_px > kp_sigma_high_px`.
+- example:
+  - `sigma_px=15.86`, `low=1.5`, `high=10.0`
+  - `u_raw = 1.69`
+- implementation clips before use:
+  - `u = clip(u_raw, 0, 1) => 1.0`
+
+Implication:
+- if `u` is clipped to `1` too often, `kp_sigma_high_px` is too low.
+- then behavior becomes mostly descriptor-dominant.
+
+Recommended calibration:
+- choose `kp_sigma_high_px` from observed high-end sigma distribution
+  (roughly upper quantile of normal operation, not absolute maximum).
+
+### 12.12 Benchmark tooling added
+
+#### 1) Acquisition script
+- `ros_ws/scripts/benchmark_local_rescue.sh`
+
+Features:
+- records selected topics to rosbag2.
+- supports modes:
+  - `all` (off->shadow->active)
+  - single mode (`off` or `shadow` or `active`)
+- stores matcher parameter snapshot per run.
+
+Usage:
+```bash
+./ros_ws/scripts/benchmark_local_rescue.sh 60 bench_off off
+./ros_ws/scripts/benchmark_local_rescue.sh 60 bench_shadow shadow
+./ros_ws/scripts/benchmark_local_rescue.sh 60 bench_active active
+```
+
+#### 2) Per-run summary script
+- `ros_ws/scripts/evaluate_local_rescue_benchmark.py`
+
+Reads one run folder and reports:
+- `*_last` (end values),
+- `*_delta` (in-bag increment for cumulative counters),
+- mean active count, mean uncertainty,
+- topic rates.
+
+Usage:
+```bash
+python3 ros_ws/scripts/evaluate_local_rescue_benchmark.py ros_ws/logs/local_rescue_benchmark/bench_off
+```
+
+#### 3) Cross-mode comparison script
+- `ros_ws/scripts/compare_local_rescue_benchmarks.py`
+
+Combines OFF/SHADOW/ACTIVE into one table and optional CSV/Markdown.
+
+Usage:
+```bash
+python3 ros_ws/scripts/compare_local_rescue_benchmarks.py \
+  --off ros_ws/logs/local_rescue_benchmark/bench_off \
+  --shadow ros_ws/logs/local_rescue_benchmark/bench_shadow \
+  --active ros_ws/logs/local_rescue_benchmark/bench_active \
+  --out-md ros_ws/logs/local_rescue_benchmark/comparison.md \
+  --out-csv ros_ws/logs/local_rescue_benchmark/comparison.csv
+```
+
+### 12.13 How to interpret benchmark metrics
+
+Primary rescue quality:
+- `success_rate_delta`: higher is better.
+- `success_delta`: higher is better.
+- `reject_delta`: lower is better.
+
+Control/filter robustness:
+- `update_success_per_sec`: higher is better.
+- `active_count_mean`: higher is better until expected active-set saturation.
+- `filter_uncertainty_mean`: lower is better.
+
+Data-quality/context checks:
+- `duration_s` should be comparable between runs.
+- `matches_rate_hz`, `filtered_rate_hz` should be in similar range.
+
+Note on cumulative counters:
+- matcher publishes cumulative counters over node lifetime.
+- cross-run comparisons must use per-bag deltas (already handled by evaluation scripts).
+
+### 12.14 Files modified/added in this iteration
+
+Core logic:
+- `ros_ws/src/ibvs_filter/ibvs_filter/filter_node.py`
+- `ros_ws/src/ibvs_matching/ibvs_matching/descriptor_matcher_node.py`
+- `ros_ws/src/ibvs_matching/ibvs_matching/local_rescue_debug_node.py`
+
+Packaging:
+- `ros_ws/src/ibvs_matching/setup.py` (new console script: `local_rescue_debug`)
+
+Benchmark + analysis:
+- `ros_ws/scripts/benchmark_local_rescue.sh`
+- `ros_ws/scripts/evaluate_local_rescue_benchmark.py`
+- `ros_ws/scripts/compare_local_rescue_benchmarks.py`
+
+Outputs:
+- `ros_ws/logs/local_rescue_benchmark/*`
