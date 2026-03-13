@@ -1,0 +1,18 @@
+Benchmark comparison
+
+| metric | off | shadow | active | better |
+| --- | --- | --- | --- | --- |
+| duration_s | 27.89 | 29.11 | 26.91 | match similar durations |
+| attempts_delta | 0 | 550 | 410 | context |
+| success_delta | 0 | 352 | 287 | higher |
+| reject_delta | 0 | 198 | 118 | lower |
+| success_rate_delta | n/a | 0.640 | 0.700 | higher |
+| success_per_sec | 0.000 | 12.090 | 10.663 | higher |
+| update_success_count_delta | 384 | 411 | 421 | higher |
+| update_success_per_sec | 13.768 | 14.117 | 15.642 | higher |
+| active_count_mean | 5.000 | 5.000 | 5.000 | higher (until saturation) |
+| active_count_last | 5 | 5 | 5 | context |
+| filter_uncertainty_mean | 142.918 | 161.932 | 92.059 | lower |
+| filter_uncertainty_last | 62.410 | 470.155 | 149.887 | lower |
+| matches_rate_hz | 18.572 | 18.857 | 18.726 | context |
+| filtered_rate_hz | 62.206 | 63.200 | 65.467 | context |

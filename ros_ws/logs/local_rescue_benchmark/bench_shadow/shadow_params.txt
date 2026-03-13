@@ -1,0 +1,11 @@
+mode=shadow
+Double value is: 0.6
+Boolean value is: True
+Double value is: 8.0
+Double value is: 24.0
+Double value is: 0.68
+Double value is: 0.82
+Double value is: 1.5
+Double value is: 10.0
+Double value is: 0.06
+Double value is: 1.1
