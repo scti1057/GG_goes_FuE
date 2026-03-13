@@ -577,6 +577,11 @@ RViz2:
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && rviz2'
 ```
 
+Constant Velocity (drive fo 10s in positive x-Axis with 1cm/s=0.01m/s)
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && timeout 10s ros2 topic pub -r 50 /cartesian_twist_passthrough_controller/cmd_vel geometry_msgs/msg/Twist \ "{linear: {x: 0.01, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"'
+```
+
 ## 8) Recommended Test Procedure (Stepwise)
 1. Start all containers.
 2. Build/source workspace in `ros_ws` container.
@@ -638,9 +643,9 @@ This minimizes re-debugging and avoids repeating controller activation/QoS issue
 
 Start filter node:
 
-EKF example (`q=2.0, r=50.0, gate=20.0, z=0.25`, active set up to 40):
+EKF example (`q=2.0, r=1.1, gate=20.0, z=0.25`, active set up to 12):
 ```bash
-docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_node --ros-args -p filter_type:=ekf -p q_noise:=2.0 -p r_noise:=50.0 -p gate_threshold:=20.0 -p z_depth:=0.25 -p max_active_keypoints:=40 -p min_init_keypoints:=8 -p min_update_keypoints:=4'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_node --ros-args -p filter_type:=ekf -p q_noise:=2.0 -p r_noise:=1.1 -p gate_threshold:=20.0 -p z_depth:=0.25 -p max_active_keypoints:=12 -p min_init_keypoints:=8 -p min_update_keypoints:=1'
 ```
 
 Start debug overlay node:
@@ -655,6 +660,7 @@ docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node gate_threshold 20.0'
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node z_depth 0.45'
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node force_relocalization true'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node min_update_keypoints 1'
 ```
 
 Hinweis:
