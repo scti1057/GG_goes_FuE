@@ -1,0 +1,16 @@
+uint32 ref_id
+float32 pred_x
+float32 pred_y
+float32 sigma_px
+float32 uncertainty_u
+float32 radius_eff_px
+float32 sim_threshold_eff
+string status
+float32 best_x
+float32 best_y
+float32 best_sim
+float32 best_score
+float32 second_score
+float32 score_gap
+float32 score_ratio
+LocalRescueDebugCandidate[] candidates

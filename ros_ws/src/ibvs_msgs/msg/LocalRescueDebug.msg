@@ -1,0 +1,14 @@
+std_msgs/Header header
+string mode
+bool context_ready
+bool filtered_stale
+float32 filter_trace
+float32 sim_floor
+float32 ambiguity_min_gap
+float32 ambiguity_min_ratio
+uint32 global_count
+uint32 final_count
+uint32 local_attempts
+uint32 local_successes
+uint32 local_applied
+LocalRescueDebugEntry[] entries

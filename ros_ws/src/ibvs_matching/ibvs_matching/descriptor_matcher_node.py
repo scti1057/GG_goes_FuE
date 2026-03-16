@@ -4,7 +4,13 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from std_msgs.msg import Float32, String, UInt32
 
-from ibvs_msgs.msg import Keypoints, Matches
+from ibvs_msgs.msg import (
+    Keypoints,
+    LocalRescueDebug,
+    LocalRescueDebugCandidate,
+    LocalRescueDebugEntry,
+    Matches,
+)
 
 
 def l2_normalize(mat: np.ndarray, eps: float = 1e-12) -> np.ndarray:
@@ -37,9 +43,9 @@ class DescriptorMatcherNode(Node):
         self.declare_parameter("sim_floor", 0.60)
         self.declare_parameter("use_adaptive_gates", True)
         self.declare_parameter("adaptive_radius_min_px", 8.0)
-        self.declare_parameter("adaptive_radius_max_px", 24.0)
-        self.declare_parameter("adaptive_sim_threshold_min", 0.68)
-        self.declare_parameter("adaptive_sim_threshold_max", 0.82)
+        self.declare_parameter("adaptive_radius_max_px", 40.0)
+        self.declare_parameter("adaptive_sim_threshold_min", 0.65)
+        self.declare_parameter("adaptive_sim_threshold_max", 0.95)
 
         # Per-keypoint uncertainty normalization (sigma_px from filtered_features.sim).
         self.declare_parameter("kp_sigma_low_px", 1.5)
@@ -59,6 +65,10 @@ class DescriptorMatcherNode(Node):
         self.declare_parameter("local_rescue_attempts_topic", "/ibvs/matching/local_rescue_attempts")
         self.declare_parameter("local_rescue_success_topic", "/ibvs/matching/local_rescue_success")
         self.declare_parameter("local_rescue_reject_topic", "/ibvs/matching/local_rescue_reject")
+
+        self.declare_parameter("publish_local_rescue_debug", True)
+        self.declare_parameter("local_rescue_debug_topic", "/ibvs/matching/local_rescue_debug")
+        self.declare_parameter("local_rescue_debug_max_candidates_per_entry", 8)
 
         self.ref_desc = None
         self.ref_d = 0
@@ -135,11 +145,23 @@ class DescriptorMatcherNode(Node):
                 10,
             )
 
+        self.pub_local_debug = None
+        if bool(self.get_parameter("publish_local_rescue_debug").value):
+            self.pub_local_debug = self.create_publisher(
+                LocalRescueDebug,
+                str(self.get_parameter("local_rescue_debug_topic").value),
+                10,
+            )
+
         self.get_logger().info(f"Sub keypoints:  {kp_topic}")
         self.get_logger().info(f"Sub reference:  {ref_topic}")
         self.get_logger().info(f"Sub filtered:   {filtered_topic}")
         self.get_logger().info(f"Sub filter unc: {filter_unc_topic}")
         self.get_logger().info(f"Pub matches:    {out_topic}")
+        if self.pub_local_debug is not None:
+            self.get_logger().info(
+                f"Pub rescue dbg: {str(self.get_parameter('local_rescue_debug_topic').value)}"
+            )
         self.get_logger().info("Local rescue mode: off|shadow|active")
 
     def _now_sec(self) -> float:
@@ -232,23 +254,50 @@ class DescriptorMatcherNode(Node):
     def on_filter_uncertainty(self, msg: Float32):
         self.latest_filter_trace = float(msg.data)
 
-    def _local_context_ready(self) -> bool:
+    def _local_context_status(self):
         mode = self._parse_mode(self.get_parameter("local_rescue_mode").value)
-        if mode == "off":
-            return False
-
         timeout = max(1e-3, float(self.get_parameter("filtered_timeout_sec").value))
+
+        filtered_stale = True
+        if self.latest_filtered_time_sec > 0.0:
+            filtered_stale = (self._now_sec() - self.latest_filtered_time_sec) > timeout
+
+        if mode == "off":
+            return False, filtered_stale
+
         if self.latest_filtered_time_sec <= 0.0:
-            return False
-        if (self._now_sec() - self.latest_filtered_time_sec) > timeout:
-            return False
+            return False, True
+
+        if filtered_stale:
+            return False, True
 
         if bool(self.get_parameter("use_uncertainty_gate").value):
             max_trace = float(self.get_parameter("max_filter_trace_for_rescue").value)
             if self.latest_filter_trace > max_trace:
-                return False
+                return False, False
 
-        return True
+        return True, False
+
+    @staticmethod
+    def _build_debug_entry(
+        rid: int,
+        pred_xy: np.ndarray,
+        sigma_px: float,
+        u: float,
+        radius_eff: float,
+        sim_thr_eff: float,
+        status: str,
+    ) -> LocalRescueDebugEntry:
+        entry = LocalRescueDebugEntry()
+        entry.ref_id = int(rid) if rid >= 0 else 0
+        entry.pred_x = float(pred_xy[0])
+        entry.pred_y = float(pred_xy[1])
+        entry.sigma_px = float(sigma_px)
+        entry.uncertainty_u = float(u)
+        entry.radius_eff_px = float(radius_eff)
+        entry.sim_threshold_eff = float(sim_thr_eff)
+        entry.status = status
+        return entry
 
     def _run_local_rescue(
         self,
@@ -260,15 +309,21 @@ class DescriptorMatcherNode(Node):
         rescues = []
         attempts = 0
         successes = 0
+        debug_entries = []
 
         if self.ref_desc is None or self.ref_desc.shape[0] <= 0:
-            return rescues, attempts, successes
+            return rescues, attempts, successes, debug_entries
         if self.latest_filtered_ref_ids.size <= 0 or self.latest_filtered_xy.shape[0] <= 0:
-            return rescues, attempts, successes
+            return rescues, attempts, successes, debug_entries
 
         max_rescues = max(0, int(self.get_parameter("max_local_rescues_per_frame").value))
         if max_rescues <= 0:
-            return rescues, attempts, successes
+            return rescues, attempts, successes, debug_entries
+
+        max_dbg_candidates = max(
+            1,
+            int(self.get_parameter("local_rescue_debug_max_candidates_per_entry").value),
+        )
 
         sim_floor = float(self.get_parameter("sim_floor").value)
         min_gap = max(0.0, float(self.get_parameter("local_ambiguity_min_score_gap").value))
@@ -281,24 +336,42 @@ class DescriptorMatcherNode(Node):
         )
         for i in range(n_f):
             rid = int(self.latest_filtered_ref_ids[i])
-            if rid in assigned_ref:
-                continue
-            if rid < 0 or rid >= self.ref_desc.shape[0]:
-                continue
-
             pred_xy = self.latest_filtered_xy[i]
             sigma_px = float(self.latest_filtered_sigma_px[i])
             u = self._normalize_uncertainty(sigma_px)
             radius_eff, sim_thr_eff = self._effective_gates(u)
-            radius2 = radius_eff * radius_eff
+            entry = self._build_debug_entry(
+                rid,
+                pred_xy,
+                sigma_px,
+                u,
+                radius_eff,
+                sim_thr_eff,
+                "SKIPPED",
+            )
 
+            if rid in assigned_ref:
+                entry.status = "SKIP_ASSIGNED_REF"
+                debug_entries.append(entry)
+                continue
+
+            if rid < 0 or rid >= self.ref_desc.shape[0]:
+                entry.status = "SKIP_INVALID_REF"
+                debug_entries.append(entry)
+                continue
+
+            radius2 = radius_eff * radius_eff
             d2 = np.sum((kpts - pred_xy[None, :]) ** 2, axis=1)
             cand_all = np.where(d2 <= radius2)[0]
             if cand_all.size <= 0:
+                entry.status = "NO_CANDIDATES"
+                debug_entries.append(entry)
                 continue
 
             cand_idx = [int(idx) for idx in cand_all.tolist() if int(idx) not in assigned_cur]
             if not cand_idx:
+                entry.status = "ALL_ASSIGNED_CUR"
+                debug_entries.append(entry)
                 continue
 
             attempts += 1
@@ -310,6 +383,8 @@ class DescriptorMatcherNode(Node):
 
             valid = (sims >= sim_floor) & (sims >= sim_thr_eff)
             if not np.any(valid):
+                entry.status = "ALL_FAIL_GATES"
+                debug_entries.append(entry)
                 continue
 
             sims_v = sims[valid]
@@ -325,17 +400,37 @@ class DescriptorMatcherNode(Node):
             score = np.power(pos_score, w_pos) * np.power(sim_norm, w_sim)
 
             order = np.argsort(-score)
+            dbg_order = order[:max_dbg_candidates]
+            for pos in dbg_order.tolist():
+                cidx = int(cand_v[int(pos)])
+                cand = LocalRescueDebugCandidate()
+                cand.x = float(kpts[cidx, 0])
+                cand.y = float(kpts[cidx, 1])
+                cand.sim = float(sims_v[int(pos)])
+                cand.score = float(score[int(pos)])
+                entry.candidates.append(cand)
+
             best = int(order[0])
             best_idx = int(cand_v[best])
             best_sim = float(sims_v[best])
             best_score = float(score[best])
+
+            entry.best_x = float(kpts[best_idx, 0])
+            entry.best_y = float(kpts[best_idx, 1])
+            entry.best_sim = best_sim
+            entry.best_score = best_score
 
             if score.size > 1:
                 second = int(order[1])
                 second_score = float(score[second])
                 gap = best_score - second_score
                 ratio = best_score / max(second_score, 1e-6)
+                entry.second_score = second_score
+                entry.score_gap = gap
+                entry.score_ratio = ratio
                 if (gap < min_gap) or (ratio < min_ratio):
+                    entry.status = "AMBIGUOUS"
+                    debug_entries.append(entry)
                     continue
 
             assigned_cur.add(best_idx)
@@ -343,10 +438,46 @@ class DescriptorMatcherNode(Node):
             rescues.append((rid, best_idx, best_sim))
             successes += 1
 
+            entry.status = "RESCUED"
+            debug_entries.append(entry)
+
             if len(rescues) >= max_rescues:
                 break
 
-        return rescues, attempts, successes
+        return rescues, attempts, successes, debug_entries
+
+    def _publish_local_rescue_debug(
+        self,
+        header,
+        mode: str,
+        context_ready: bool,
+        filtered_stale: bool,
+        global_count: int,
+        final_count: int,
+        local_attempts: int,
+        local_successes: int,
+        local_applied: int,
+        entries,
+    ):
+        if self.pub_local_debug is None:
+            return
+
+        dbg = LocalRescueDebug()
+        dbg.header = header
+        dbg.mode = mode
+        dbg.context_ready = bool(context_ready)
+        dbg.filtered_stale = bool(filtered_stale)
+        dbg.filter_trace = float(self.latest_filter_trace)
+        dbg.sim_floor = float(self.get_parameter("sim_floor").value)
+        dbg.ambiguity_min_gap = float(self.get_parameter("local_ambiguity_min_score_gap").value)
+        dbg.ambiguity_min_ratio = float(self.get_parameter("local_ambiguity_min_score_ratio").value)
+        dbg.global_count = int(max(0, global_count))
+        dbg.final_count = int(max(0, final_count))
+        dbg.local_attempts = int(max(0, local_attempts))
+        dbg.local_successes = int(max(0, local_successes))
+        dbg.local_applied = int(max(0, local_applied))
+        dbg.entries = list(entries)
+        self.pub_local_debug.publish(dbg)
 
     def _publish_stats(
         self,
@@ -444,9 +575,11 @@ class DescriptorMatcherNode(Node):
         local_attempts = 0
         local_successes = 0
         local_applied = 0
+        debug_entries = []
 
-        if self._local_context_ready():
-            rescues, local_attempts, local_successes = self._run_local_rescue(
+        local_context_ready, filtered_stale = self._local_context_status()
+        if local_context_ready:
+            rescues, local_attempts, local_successes, debug_entries = self._run_local_rescue(
                 kpts,
                 desc,
                 assigned_cur,
@@ -458,6 +591,20 @@ class DescriptorMatcherNode(Node):
                     out_xy.append(kpts[int(cur_idx)])
                     out_sim.append(float(sim))
                 local_applied = len(rescues)
+
+        final_count = len(out_ref)
+        self._publish_local_rescue_debug(
+            msg.header,
+            mode,
+            local_context_ready,
+            filtered_stale,
+            global_count,
+            final_count,
+            local_attempts,
+            local_successes,
+            local_applied,
+            debug_entries,
+        )
 
         if not out_ref:
             self._publish_stats(

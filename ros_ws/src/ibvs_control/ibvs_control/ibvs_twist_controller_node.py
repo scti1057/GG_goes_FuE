@@ -85,6 +85,7 @@ class IbvsTwistControllerNode(Node):
         self.goal_reached: bool = False
         self.goal_hold_start_sec: Optional[float] = None
         self.last_log_sec: float = 0.0
+        self._last_change_log_text: dict[str, str] = {}
 
         ref_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -161,7 +162,10 @@ class IbvsTwistControllerNode(Node):
             self.get_logger().warn('Reference xy length not even; ignoring.')
             return
         self.ref_xy = xy.reshape(-1, 2)
-        self.get_logger().info(f'Reference cached for control: K={self.ref_xy.shape[0]}')
+        self.log_info_once_on_change(
+            'reference_cached_for_control',
+            f'Reference cached for control: K={self.ref_xy.shape[0]}',
+        )
 
     def _cache_matches(self, msg: Matches):
         if self.ref_xy is None:
@@ -317,6 +321,15 @@ class IbvsTwistControllerNode(Node):
         self.last_log_sec = now
         self.get_logger().info(text)
 
+    def log_info_once_on_change(self, key: str, text: str):
+        if self._last_change_log_text.get(key) == text:
+            return
+        self._last_change_log_text[key] = text
+        self.get_logger().info(text)
+
+    def reset_change_log(self, key: str):
+        self._last_change_log_text.pop(key, None)
+
     def _select_feature_set(self, now: float, timeout_sec: float):
         source_pref = str(self.get_parameter('feature_source').value).strip().lower()
         if source_pref not in ('filtered', 'raw'):
@@ -353,12 +366,17 @@ class IbvsTwistControllerNode(Node):
 
         enable_motion = bool(self.get_parameter('enable_motion').value)
         require_init_done = bool(self.get_parameter('require_init_done').value)
+        if enable_motion:
+            self.reset_change_log('motion_disabled_enable_motion_false')
         if (not enable_motion) or (require_init_done and not self.init_done):
             self.goal_hold_start_sec = None
             self.publish_goal(False)
             self.publish_zero_twist()
             if not enable_motion:
-                self.maybe_log_status('Motion disabled (enable_motion=false).')
+                self.log_info_once_on_change(
+                    'motion_disabled_enable_motion_false',
+                    'Motion disabled (enable_motion=false).',
+                )
             else:
                 self.maybe_log_status('Waiting for /ibvs/init_done=true before moving.')
             return

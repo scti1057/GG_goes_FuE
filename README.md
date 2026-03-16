@@ -41,7 +41,7 @@ Pipeline:
 1. `ibvs_perception/keypoint` detects keypoints + descriptors on camera images.
 2. `ibvs_reference/reference_manager` captures a robust reference set (time window + consistency counts).
 3. `ibvs_matching/descriptor_matcher` matches live descriptors to reference descriptors.
-4. `ibvs_filter/filter_node` tracks a bounded active keypoint set with EKF/UKF/ESKF/SKF.
+4. `ibvs_filter_cpp/filter_node` tracks a bounded active keypoint set with EKF/UKF/ESKF/SKF.
 5. `ibvs_filter/filter_debug_node` overlays raw vs. filtered features and filter diagnostics.
 6. `ibvs_control/ibvs_twist_controller` computes IBVS twist from selected feature source (`filtered` or `raw`) and publishes to UR twist controller.
 
@@ -185,8 +185,8 @@ Important params:
 - `miss_max`
 - `radius`
 
-## 5.6 `ibvs_filter` - `filter_node`
-Node: `ibvs_filter.filter_node`
+## 5.6 `ibvs_filter_cpp` - `filter_node`
+Node: `ibvs_filter_cpp/filter_node`
 
 Purpose:
 - Keep a bounded active set of reference-indexed keypoints (`max_active_keypoints`).
@@ -482,9 +482,11 @@ Typical flow in manager:
 - `1` (core)
 - `2` (init capture)
 - `3` (tracking)
+- `7` (Filter-Menü: `ibvs_filter_cpp/filter_node` starten/stoppen + Parameter setzen)
+- `8` (`local_rescue_mode` des `descriptor_matcher_node` setzen: off|shadow|active)
 
 Note:
-- `ibvs_filter/filter_node` and `ibvs_filter/filter_debug_node` are started separately (not by the manager menu).
+- `ibvs_filter_cpp/filter_node` and `ibvs_filter/filter_debug_node` are started separately (not by the manager menu).
 
 ## 6.4 Start controller manually
 ```bash
@@ -525,6 +527,7 @@ Activate twist controller if needed:
 ```bash
 docker exec -it ros2_ur_driver bash -lc 'source /home/ros_ws/install/setup.bash && ros2 control switch_controllers --activate cartesian_twist_passthrough_controller --deactivate joint_trajectory_controller scaled_joint_trajectory_controller forward_position_controller forward_velocity_controller passthrough_trajectory_controller'
 ```
+If you want to do it correct do it directly in the robot container!!!
 
 ## 6.6 UR run-state checks (critical)
 ```bash
@@ -579,7 +582,6 @@ Local rescue debug image (separate node):
 ```bash
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_matching local_rescue_debug'
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /local_rescue_debug_node focus_ref_id 5'
-docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /local_rescue_debug_node sim_floor 0.60'
 ```
 
 Match viz:
@@ -589,7 +591,7 @@ docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 
 
 Filter:
 ```bash
-docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_node'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter_cpp filter_node'
 ```
 
 Filter debug:
@@ -664,13 +666,21 @@ When opening a new chat/session, include:
 
 This minimizes re-debugging and avoids repeating controller activation/QoS issues.
 
-## 11) Filter Tuning (ibvs_filter)
+## 11) Filter Tuning (ibvs_filter_cpp)
 
 Start filter node:
+- Package: `ibvs_filter_cpp`
+- Node name (for params): `/ibvs_filter_node`
 
 EKF example (`q=2.0, r=1.1, gate=20.0, z=0.25`, active set up to 12):
 ```bash
-docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_node --ros-args -p filter_type:=ekf -p q_noise:=2.0 -p r_noise:=1.1 -p gate_threshold:=20.0 -p z_depth:=0.25 -p max_active_keypoints:=12 -p min_init_keypoints:=8 -p min_update_keypoints:=1'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter_cpp filter_node --ros-args -p filter_type:=ekf -p q_noise:=2.0 -p r_noise:=1.1 -p gate_threshold:=20.0 -p z_depth:=0.25 -p max_active_keypoints:=12 -p min_init_keypoints:=8 -p min_update_keypoints:=1'
+```
+
+Check node + parameters:
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 node list | rg ibvs_filter_node'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param list /ibvs_filter_node'
 ```
 
 Start debug overlay node:
@@ -686,6 +696,12 @@ docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node z_depth 0.45'
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node force_relocalization true'
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node min_update_keypoints 1'
+```
+
+Manual relocalization re-trigger (`false -> true`):
+```bash
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node force_relocalization false'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 param set /ibvs_filter_node force_relocalization true'
 ```
 
 Hinweis:
@@ -746,7 +762,8 @@ Goal of local rescue:
 #### Added/extended path
 - `filter_node` now publishes per-active-keypoint uncertainty on `/ibvs/filtered_features.sim` (see 12.3).
 - `descriptor_matcher_node` subscribes to `/ibvs/filtered_features` and can run local rescue.
-- `local_rescue_debug_node` visualizes rescue logic and can synchronize parameters from `/descriptor_matcher_node`.
+- `descriptor_matcher_node` additionally publishes `/ibvs/matching/local_rescue_debug`.
+- `local_rescue_debug_node` renders only this debug stream (no local rescue recomputation).
 
 ### 12.3 Per-keypoint uncertainty (from existing covariance, no extra filter instances)
 
@@ -804,6 +821,7 @@ ros2 param set /descriptor_matcher_node local_rescue_mode active
 
 First normalize uncertainty:
 - raw normalization:
+  - $u_\mathrm{raw} = \frac{sigma\_px-kp\_sigma\_low\_px}{kp\_sigma\_high_\_px - kp\_sigma\_low\_px}$
   - `u_raw = (sigma_px - kp_sigma_low_px) / (kp_sigma_high_px - kp_sigma_low_px)`
 - clipped:
   - `u = clip(u_raw, 0, 1)`
@@ -880,32 +898,25 @@ Main overlays:
   - `r` effective radius
   - `thr` effective similarity threshold
   - `best=sim/score`
-  - `OK` or `AMB`
+  - status from matcher (`RESCUED`, `AMBIGUOUS`, ...)
 
 Status messages:
-- `no candidates`: nothing in local radius.
-- `all fail gates`: candidates found, but hard/adaptive gates failed.
-- `stale=true`: filtered predictions too old (`filtered_timeout_sec`).
+- `NO_CANDIDATES`: nothing in local radius.
+- `ALL_FAIL_GATES`: candidates found, but hard/adaptive gates failed.
+- `filtered_stale=true`: filtered predictions too old in matcher.
 
-### 12.10 Parameter synchronization (debug node <- matcher node)
+### 12.10 Debug data flow and parameter events
 
-Implemented with ROS2 `AsyncParameterClient`:
-- debug node periodically reads rescue-relevant parameters from `/descriptor_matcher_node`.
-- avoids mismatch between actual matcher logic and debug visualization.
+The matcher is the only source of rescue decisions:
+- rescue logic is computed once in `descriptor_matcher_node`.
+- debug payload is published on `/ibvs/matching/local_rescue_debug`.
+- `local_rescue_debug_node` only renders this payload.
 
-Debug sync parameters:
-- `sync_matcher_params` (default `true`)
-- `matcher_node_name` (default `/descriptor_matcher_node`)
-- `matcher_param_poll_hz` (default `2.0`)
+No polling-based parameter sync is used anymore.
 
-Synchronized parameter set:
-- `sim_floor`
-- `use_adaptive_gates`
-- `adaptive_radius_min_px`, `adaptive_radius_max_px`
-- `adaptive_sim_threshold_min`, `adaptive_sim_threshold_max`
-- `kp_sigma_low_px`, `kp_sigma_high_px`
-- `local_ambiguity_min_score_gap`, `local_ambiguity_min_score_ratio`
-- plus fixed-gate fallback params.
+For runtime transparency:
+- `local_rescue_debug_node` subscribes to `/parameter_events`.
+- changes from `/descriptor_matcher_node` are shown in the debug overlay as recent parameter updates.
 
 ### 12.11 Why `u` can appear above 1.0 in logs
 
@@ -995,7 +1006,12 @@ Note on cumulative counters:
 ### 12.14 Files modified/added in this iteration
 
 Core logic:
-- `ros_ws/src/ibvs_filter/ibvs_filter/filter_node.py`
+- `ros_ws/src/ibvs_filter_cpp/src/filter_node.cpp`
+- `ros_ws/src/ibvs_filter_cpp/src/base_filter.cpp`
+- `ros_ws/src/ibvs_filter_cpp/src/filters.cpp`
+- `ros_ws/src/ibvs_filter_cpp/include/ibvs_filter_cpp/base_filter.hpp`
+- `ros_ws/src/ibvs_filter_cpp/include/ibvs_filter_cpp/filters.hpp`
+- `ros_ws/src/ibvs_filter_cpp/include/ibvs_filter_cpp/ibvs_math.hpp`
 - `ros_ws/src/ibvs_matching/ibvs_matching/descriptor_matcher_node.py`
 - `ros_ws/src/ibvs_matching/ibvs_matching/local_rescue_debug_node.py`
 

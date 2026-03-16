@@ -188,6 +188,8 @@ class IbvsSessionManager:
             f"output_topic:={self.args.matches_debug_topic}",
         ]
 
+        filter_cmd = self._build_filter_cmd()
+
         return {
             "keypoint": ManagedProcess("keypoint", keypoint_cmd, self.log_dir / "keypoint.log"),
             "reference_manager": ManagedProcess(
@@ -197,13 +199,241 @@ class IbvsSessionManager:
                 "descriptor_matcher", matcher_cmd, self.log_dir / "descriptor_matcher.log"
             ),
             "matches_viz": ManagedProcess("matches_viz", matches_viz_cmd, self.log_dir / "matches_viz.log"),
+            "filter_node": ManagedProcess("filter_node", filter_cmd, self.log_dir / "filter_node.log"),
         }
+
+    def _build_filter_cmd(self) -> List[str]:
+        return [
+            "ros2",
+            "run",
+            self.args.filter_package,
+            self.args.filter_executable,
+            "--ros-args",
+            "-p",
+            f"filter_type:={self.args.filter_type}",
+            "-p",
+            f"q_noise:={self.args.filter_q_noise}",
+            "-p",
+            f"r_noise:={self.args.filter_r_noise}",
+            "-p",
+            f"gate_threshold:={self.args.filter_gate_threshold}",
+            "-p",
+            f"z_depth:={self.args.filter_z_depth}",
+            "-p",
+            f"predict_rate:={self.args.filter_predict_rate}",
+            "-p",
+            f"max_active_keypoints:={self.args.filter_max_active_keypoints}",
+            "-p",
+            f"min_init_keypoints:={self.args.filter_min_init_keypoints}",
+            "-p",
+            f"min_update_keypoints:={self.args.filter_min_update_keypoints}",
+        ]
 
     def _is_core_running(self) -> bool:
         return self.processes["keypoint"].is_running() and self.processes["reference_manager"].is_running()
 
     def _is_tracking_running(self) -> bool:
         return self.processes["descriptor_matcher"].is_running() and self.processes["matches_viz"].is_running()
+
+    def _is_filter_running(self) -> bool:
+        return self.processes["filter_node"].is_running()
+
+    def _refresh_filter_cmd(self) -> None:
+        self.processes["filter_node"].cmd = self._build_filter_cmd()
+
+    def start_filter(self) -> None:
+        self._refresh_filter_cmd()
+        print("\n[filter] Starte filter_node ...")
+        proc = self.processes["filter_node"]
+        started = proc.start()
+        if started:
+            print(f"  - filter_node gestartet (pid={proc.process.pid})")
+        else:
+            print(f"  - filter_node läuft bereits (pid={proc.process.pid})")
+        print(f"[filter] Logs: {self.log_dir / 'filter_node.log'}")
+
+    def stop_filter(self) -> None:
+        print("\n[filter] Stoppe filter_node ...")
+        stopped = self.processes["filter_node"].stop()
+        print(f"  - filter_node: {'gestoppt' if stopped else 'war bereits aus'}")
+
+    def _set_filter_param(self, param_name: str, value: str) -> bool:
+        cmd_set = [
+            "ros2",
+            "param",
+            "set",
+            self.args.filter_node_name,
+            param_name,
+            value,
+        ]
+        rc_set, out_set = run_cmd(cmd_set, timeout_sec=float(self.args.filter_param_timeout))
+        if rc_set != 0:
+            short = out_set.splitlines()[-1] if out_set else "(kein output)"
+            print(f"  - FEHLER beim Setzen: {short}")
+            return False
+
+        cmd_get = ["ros2", "param", "get", self.args.filter_node_name, param_name]
+        rc_get, out_get = run_cmd(cmd_get, timeout_sec=float(self.args.filter_param_timeout))
+        if rc_get == 0:
+            print(f"  - OK: {out_get.splitlines()[-1] if out_get else '(leer)'}")
+        else:
+            print("  - WARN: gesetzt, aber Rücklesen fehlgeschlagen")
+        return True
+
+    def print_filter_params(self) -> None:
+        print("\n[filter] Parameter-Snapshot:")
+        print(f"  - node: {self.args.filter_node_name}")
+        print(f"  - running: {self._is_filter_running()}")
+
+        key_params = (
+            "filter_type",
+            "q_noise",
+            "r_noise",
+            "gate_threshold",
+            "z_depth",
+            "predict_rate",
+            "max_active_keypoints",
+            "min_init_keypoints",
+            "min_update_keypoints",
+            "force_relocalization",
+        )
+        for p in key_params:
+            rc, out = run_cmd(
+                ["ros2", "param", "get", self.args.filter_node_name, p],
+                timeout_sec=float(self.args.filter_param_timeout),
+            )
+            if rc == 0:
+                val = out.splitlines()[-1] if out else "(leer)"
+                print(f"  - {p}: {val}")
+            else:
+                print(f"  - {p}: (nicht lesbar)")
+
+    def filter_menu(self) -> None:
+        while True:
+            print("\n--- Filter Menü ---")
+            print("  1) Filter starten")
+            print("  2) Filter stoppen")
+            print("  3) Filter-Parameter anzeigen")
+            print("  4) Filter-Parameter setzen (runtime)")
+            print("  5) Manuelle Relokalisierung triggern")
+            print("  6) Startup-Filtertyp setzen (nächster Start)")
+            print("  b) Zurück")
+
+            choice = input("\nFilter-Auswahl: ").strip().lower()
+
+            if choice == "1":
+                self.start_filter()
+            elif choice == "2":
+                self.stop_filter()
+            elif choice == "3":
+                self.print_filter_params()
+            elif choice == "4":
+                print(
+                    "  Bekannte Runtime-Parameter: "
+                    "q_noise, r_noise, gate_threshold, z_depth, predict_rate, "
+                    "max_active_keypoints, min_init_keypoints, min_update_keypoints, "
+                    "force_relocalization"
+                )
+                param_name = input("  Param-Name: ").strip()
+                value = input("  Wert: ").strip()
+                if not param_name or not value:
+                    print("  - Abgebrochen (ungültige Eingabe).")
+                    continue
+                self._set_filter_param(param_name, value)
+            elif choice == "5":
+                print("  Trigger: force_relocalization false -> true")
+                ok_false = self._set_filter_param("force_relocalization", "false")
+                ok_true = self._set_filter_param("force_relocalization", "true")
+                print(f"  - Relokalisierung: {'ok' if ok_false and ok_true else 'FEHLER'}")
+            elif choice == "6":
+                next_type = input("  Neuer filter_type (ekf|ukf|eskf|skf): ").strip().lower()
+                if next_type not in ("ekf", "ukf", "eskf", "skf"):
+                    print("  - Ungültiger filter_type.")
+                    continue
+                self.args.filter_type = next_type
+                self._refresh_filter_cmd()
+                print(f"  - Startup filter_type gesetzt: {next_type}")
+                if self._is_filter_running():
+                    restart = input("  Filter läuft. Neustarten mit neuem Typ? (y/N): ").strip().lower()
+                    if restart == "y":
+                        self.stop_filter()
+                        self.start_filter()
+            elif choice == "b":
+                return
+            else:
+                print("  - Unbekannte Eingabe.")
+
+    def get_local_rescue_mode(self) -> Optional[str]:
+        cmd = [
+            "ros2",
+            "param",
+            "get",
+            self.args.descriptor_matcher_node,
+            "local_rescue_mode",
+        ]
+        rc, out = run_cmd(cmd, timeout_sec=float(self.args.descriptor_param_timeout))
+        if rc != 0:
+            return None
+
+        m = re.search(r"string value is:\s*['\"]?([^'\"\n]+)", out, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip().lower()
+        return None
+
+    def set_local_rescue_mode(self, mode: str) -> bool:
+        mode = str(mode).strip().lower()
+        if mode not in ("off", "shadow", "active"):
+            print("  - Ungültiger local_rescue_mode. Erlaubt: off|shadow|active")
+            return False
+
+        cmd_set = [
+            "ros2",
+            "param",
+            "set",
+            self.args.descriptor_matcher_node,
+            "local_rescue_mode",
+            mode,
+        ]
+        rc_set, out_set = run_cmd(cmd_set, timeout_sec=float(self.args.descriptor_param_timeout))
+        if rc_set != 0:
+            short = out_set.splitlines()[-1] if out_set else "(kein output)"
+            print(f"  - FEHLER beim Setzen von local_rescue_mode: {short}")
+            return False
+
+        current = self.get_local_rescue_mode()
+        if current is None:
+            print("  - WARN: gesetzt, aber Rücklesen fehlgeschlagen")
+            return True
+        if current != mode:
+            print(f"  - WARN: Rücklesen={current}, erwartet={mode}")
+            return False
+        print(f"  - OK: local_rescue_mode={current}")
+        return True
+
+    def local_rescue_mode_menu(self) -> None:
+        while True:
+            current = self.get_local_rescue_mode()
+            current_str = current if current is not None else "unbekannt (Node nicht erreichbar?)"
+
+            print("\n--- Local Rescue Mode ---")
+            print(f"  Node: {self.args.descriptor_matcher_node}")
+            print(f"  Aktuell: {current_str}")
+            print("  1) off")
+            print("  2) shadow")
+            print("  3) active")
+            print("  b) Zurück")
+
+            choice = input("\nAuswahl: ").strip().lower()
+            if choice == "1":
+                self.set_local_rescue_mode("off")
+            elif choice == "2":
+                self.set_local_rescue_mode("shadow")
+            elif choice == "3":
+                self.set_local_rescue_mode("active")
+            elif choice == "b":
+                return
+            else:
+                print("  - Unbekannte Eingabe.")
 
     def start_core(self) -> None:
         print("\n[core] Starte keypoint + reference_manager ...")
@@ -448,6 +678,7 @@ class IbvsSessionManager:
             print("[init] Timeout beim Warten auf init_done=true.")
 
     def stop_all(self) -> None:
+        self.stop_filter()
         self.stop_tracking()
         self.stop_core()
 
@@ -528,6 +759,8 @@ class IbvsSessionManager:
         print("  4) Tracking stoppen")
         print("  5) Status anzeigen")
         print("  6) Alle Nodes stoppen")
+        print("  7) Filter Menü (ibvs_filter_cpp)")
+        print("  8) local_rescue_mode setzen (descriptor_matcher)")
         print("  q) Beenden (stoppt ebenfalls alle Nodes)")
 
     def run(self) -> int:
@@ -557,6 +790,10 @@ class IbvsSessionManager:
                     self.print_status()
                 elif choice == "6":
                     self.stop_all()
+                elif choice == "7":
+                    self.filter_menu()
+                elif choice == "8":
+                    self.local_rescue_mode_menu()
                 elif choice == "q":
                     print("\nBeende Manager und stoppe alle Nodes ...")
                     self.stop_all()
@@ -596,6 +833,22 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--match-threshold", type=float, default=0.85)
     parser.add_argument("--mutual-check", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--descriptor-matcher-node", default="/descriptor_matcher_node")
+    parser.add_argument("--descriptor-param-timeout", type=float, default=6.0)
+
+    parser.add_argument("--filter-package", default="ibvs_filter_cpp")
+    parser.add_argument("--filter-executable", default="filter_node")
+    parser.add_argument("--filter-node-name", default="/ibvs_filter_node")
+    parser.add_argument("--filter-param-timeout", type=float, default=6.0)
+    parser.add_argument("--filter-type", default="ekf")
+    parser.add_argument("--filter-q-noise", type=float, default=2.0)
+    parser.add_argument("--filter-r-noise", type=float, default=1.1)
+    parser.add_argument("--filter-gate-threshold", type=float, default=20.0)
+    parser.add_argument("--filter-z-depth", type=float, default=0.25)
+    parser.add_argument("--filter-predict-rate", type=float, default=120.0)
+    parser.add_argument("--filter-max-active-keypoints", type=int, default=12)
+    parser.add_argument("--filter-min-init-keypoints", type=int, default=8)
+    parser.add_argument("--filter-min-update-keypoints", type=int, default=1)
 
     parser.add_argument("--camera-node", default="/camera/camera")
     parser.add_argument("--camera-param-timeout", type=float, default=6.0)

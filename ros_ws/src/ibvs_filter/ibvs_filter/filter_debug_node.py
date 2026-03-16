@@ -388,12 +388,12 @@ class FilterDebugNode(Node):
 
         # Compact panel in the upper-right corner.
         margin = 10
-        panel_w, panel_h = 110, 85
+        panel_w, panel_h = 80, 85
         panel_tl = (max(0, w - panel_w - margin), margin)
         panel_br = (min(w - 1, panel_tl[0] + panel_w), min(h - 1, panel_tl[1] + panel_h))
 
         # Origin is near the lower-right inside this panel so +x left and +y up are visible.
-        origin = (panel_br[0]-40, panel_br[1] - 18)
+        origin = (panel_br[0]-50, panel_br[1] - 18)
         axis_len = 30
 
         # Background panel for readability.
@@ -409,7 +409,7 @@ class FilterDebugNode(Node):
         cv2.arrowedLine(
             cv_img,
             origin,
-            (origin[0] - axis_len, origin[1]),
+            (origin[0] + axis_len, origin[1]),
             color_x,
             1,
             cv2.LINE_AA,
@@ -418,7 +418,7 @@ class FilterDebugNode(Node):
         cv2.putText(
             cv_img,
             '+x',
-            (origin[0] - axis_len - 20, origin[1] - 2),
+            (origin[0] + axis_len, origin[1] - 2),
             font,
             0.38,
             color_x,
@@ -470,7 +470,7 @@ class FilterDebugNode(Node):
         cv2.putText(
             cv_img,
             '+z',
-            (z_center[0] + 8, z_center[1] + 12),
+            (z_center[0] - 20, z_center[1] + 12),
             font,
             0.38,
             color_z,
