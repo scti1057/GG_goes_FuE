@@ -615,6 +615,10 @@ class IbvsSessionManager:
             self.start_core()
             time.sleep(1.0)
 
+        if self.args.tracking_keep_aligned_depth:
+            if not self.set_camera_align_depth_mode(enabled=True):
+                return
+
         if not self.set_keypoint_depth_roi_mode(enabled=False):
             return
 
@@ -671,9 +675,15 @@ class IbvsSessionManager:
         done = self.wait_for_init_done(timeout_sec=self.args.init_wait_timeout)
         if done:
             print("[init] Initialisierung abgeschlossen.")
-            print("[init] Setze Kamera direkt auf Tracking-Parameter (Filter/Align aus) ...")
-            if not self.set_camera_processing_mode("post_init_tracking_prep", enabled=False):
-                return
+            if self.args.tracking_keep_aligned_depth:
+                print(
+                    "[init] Behalte align_depth für Tracking aktiv "
+                    "(--tracking-keep-aligned-depth=true)."
+                )
+            else:
+                print("[init] Setze Kamera direkt auf Tracking-Parameter (Filter/Align aus) ...")
+                if not self.set_camera_processing_mode("post_init_tracking_prep", enabled=False):
+                    return
         else:
             print("[init] Timeout beim Warten auf init_done=true.")
 
@@ -862,6 +872,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "If enabled, toggle RealSense align_depth.enable at runtime "
             "for initialization mode."
+        ),
+    )
+    parser.add_argument(
+        "--tracking-keep-aligned-depth",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Keep camera align_depth enabled for tracking. "
+            "Disable only if you explicitly want the old post-init behavior "
+            "(align_depth off during tracking prep)."
         ),
     )
 

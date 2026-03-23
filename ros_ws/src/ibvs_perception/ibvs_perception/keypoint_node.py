@@ -45,12 +45,16 @@ class KeypointNode(Node):
         self.declare_parameter('depth_scale', 0.001)      # uint16 depth image (mm -> m)
         self.declare_parameter('min_valid_depth_m', 0.05)
         self.declare_parameter('near_mask_dilate_px', 5)
+        self.declare_parameter('attach_depth_to_keypoints', True)
+        self.declare_parameter('max_depth_age_sec', 0.20)
 
         # Future hook: dynamic workspace ROI for UR5e base exclusion
         self.declare_parameter('use_workspace_roi', False)
 
         self.bridge = CvBridge()
         self.latest_near_mask = None  # type: np.ndarray | None
+        self.latest_depth_raw = None  # type: np.ndarray | None
+        self.latest_depth_stamp_sec = -1.0
 
         self.debug_mode = bool(self.get_parameter('debug_mode').value)
         self.use_depth_roi = bool(self.get_parameter('use_depth_roi').value)
@@ -120,10 +124,22 @@ class KeypointNode(Node):
             self.get_logger().info(f'Publishing near-mask:     {bin_topic}')
         else:
             self.get_logger().info('Debug mode disabled.')
+        self.get_logger().info(
+            "Depth-to-keypoints: "
+            f"{'on' if bool(self.get_parameter('attach_depth_to_keypoints').value) else 'off'} "
+            f"(max_age={float(self.get_parameter('max_depth_age_sec').value):.2f}s)"
+        )
 
     @staticmethod
     def _topic_uses_compressed(topic: str) -> bool:
         return topic.endswith('/compressed') or topic.endswith('/compressedDepth')
+
+    def _now_sec(self) -> float:
+        return float(self.get_clock().now().nanoseconds) * 1e-9
+
+    @staticmethod
+    def _stamp_to_sec(stamp: Any) -> float:
+        return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
     @staticmethod
     def _decode_compressed_depth_payload(msg: CompressedImage) -> np.ndarray:
@@ -182,6 +198,63 @@ class KeypointNode(Node):
             return bgr
         return self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
 
+    def _depth_raw_to_meters(self, depth_raw: np.ndarray) -> np.ndarray:
+        if depth_raw.dtype == np.uint16:
+            scale = float(self.get_parameter('depth_scale').value)
+            return depth_raw.astype(np.float32) * scale
+        return depth_raw.astype(np.float32)
+
+    def _sample_depth_at_keypoints(
+        self,
+        kpts_xy: np.ndarray,
+        color_shape: tuple[int, int],
+    ) -> tuple[np.ndarray, float]:
+        n = int(kpts_xy.shape[0])
+        depth_out = np.full((n,), np.nan, dtype=np.float32)
+        if n <= 0:
+            return depth_out, float('nan')
+
+        if not bool(self.get_parameter('attach_depth_to_keypoints').value):
+            return depth_out, float('nan')
+
+        depth_raw = self.latest_depth_raw
+        if depth_raw is None or depth_raw.ndim != 2:
+            return depth_out, float('inf')
+
+        age_sec = float('inf')
+        if self.latest_depth_stamp_sec > 0.0:
+            age_sec = max(0.0, self._now_sec() - self.latest_depth_stamp_sec)
+        max_age_sec = max(0.0, float(self.get_parameter('max_depth_age_sec').value))
+        if age_sec > max_age_sec:
+            return depth_out, age_sec
+
+        color_h, color_w = int(color_shape[0]), int(color_shape[1])
+        depth_h, depth_w = int(depth_raw.shape[0]), int(depth_raw.shape[1])
+        if color_h <= 0 or color_w <= 0 or depth_h <= 0 or depth_w <= 0:
+            return depth_out, age_sec
+
+        if depth_h == color_h and depth_w == color_w:
+            x = np.rint(kpts_xy[:, 0]).astype(np.int32)
+            y = np.rint(kpts_xy[:, 1]).astype(np.int32)
+        else:
+            sx = depth_w / float(color_w)
+            sy = depth_h / float(color_h)
+            x = np.rint(kpts_xy[:, 0] * sx).astype(np.int32)
+            y = np.rint(kpts_xy[:, 1] * sy).astype(np.int32)
+
+        inside = (x >= 0) & (x < depth_w) & (y >= 0) & (y < depth_h)
+        idx = np.where(inside)[0]
+        if idx.size == 0:
+            return depth_out, age_sec
+
+        sampled = depth_raw[y[idx], x[idx]]
+        sampled_m = self._depth_raw_to_meters(sampled)
+        min_depth = float(self.get_parameter('min_valid_depth_m').value)
+        valid = np.isfinite(sampled_m) & (sampled_m > min_depth)
+        if np.any(valid):
+            depth_out[idx[valid]] = sampled_m[valid].astype(np.float32)
+        return depth_out, age_sec
+
     def _make_near_mask(self, depth_raw: np.ndarray) -> np.ndarray | None:
         if depth_raw.ndim != 2:
             return None
@@ -236,11 +309,25 @@ class KeypointNode(Node):
 
     def on_depth(self, msg: Any):
         try:
-            if not bool(self.get_parameter('use_depth_roi').value):
+            use_depth_roi = bool(self.get_parameter('use_depth_roi').value)
+            attach_depth = bool(self.get_parameter('attach_depth_to_keypoints').value)
+            if not use_depth_roi and not attach_depth:
                 self.latest_near_mask = None
+                self.latest_depth_raw = None
+                self.latest_depth_stamp_sec = -1.0
                 return
+
             depth_raw = self._decode_depth(msg)
-            self.latest_near_mask = self._make_near_mask(depth_raw)
+            self.latest_depth_raw = depth_raw
+            stamp_sec = self._stamp_to_sec(msg.header.stamp)
+            if not np.isfinite(stamp_sec) or stamp_sec <= 0.0:
+                stamp_sec = self._now_sec()
+            self.latest_depth_stamp_sec = stamp_sec
+
+            if use_depth_roi:
+                self.latest_near_mask = self._make_near_mask(depth_raw)
+            else:
+                self.latest_near_mask = None
         except Exception as e:
             self.latest_near_mask = None
             self.get_logger().warn(f'depth callback error: {e}')
@@ -292,10 +379,15 @@ class KeypointNode(Node):
                 res.scores,
                 near_mask,
             )
+            pub_depth_m, depth_age_sec = self._sample_depth_at_keypoints(pub_kpts, gray.shape)
 
             kp_msg = Keypoints()
             kp_msg.header = msg.header
             kp_msg.xy = pub_kpts.reshape(-1).astype(np.float32).tolist()
+            if bool(self.get_parameter('attach_depth_to_keypoints').value):
+                kp_msg.depth_m = pub_depth_m.astype(np.float32).reshape(-1).tolist()
+            else:
+                kp_msg.depth_m = []
 
             if pub_desc is None:
                 kp_msg.descriptor_dim = 0
@@ -321,8 +413,31 @@ class KeypointNode(Node):
 
                 # Red: keypoints that are actually published after ROI filtering
                 if keep_mask.size == all_kpts.shape[0]:
-                    for x, y in all_kpts[keep_mask]:
-                        cv2.circle(overlay, (int(x), int(y)), 2, (0, 0, 255), -1)
+                    for i, (x, y) in enumerate(all_kpts[keep_mask]):
+                        if i < pub_depth_m.shape[0] and np.isfinite(pub_depth_m[i]):
+                            c = (0, 0, 255)
+                        else:
+                            c = (255, 0, 0)
+                        cv2.circle(overlay, (int(x), int(y)), 2, c, -1)
+
+                valid_depth = int(np.count_nonzero(np.isfinite(pub_depth_m)))
+                median_depth = (
+                    float(np.nanmedian(pub_depth_m))
+                    if valid_depth > 0 else float('nan')
+                )
+                depth_age_ms = depth_age_sec * 1000.0 if np.isfinite(depth_age_sec) else float('nan')
+                depth_med_txt = f"{median_depth:.3f}m" if np.isfinite(median_depth) else "n/a"
+                depth_age_txt = f"{depth_age_ms:.0f}ms" if np.isfinite(depth_age_ms) else "n/a"
+                cv2.putText(
+                    overlay,
+                    f"depth valid={valid_depth}/{pub_kpts.shape[0]} med={depth_med_txt} age={depth_age_txt}",
+                    (10, 48),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
 
                 dbg = self.bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
                 dbg.header = msg.header
@@ -336,7 +451,8 @@ class KeypointNode(Node):
 
             self.get_logger().debug(
                 f'kpts_all={all_kpts.shape[0]} kpts_pub={pub_kpts.shape[0]} '
-                f'roi={"on" if self.use_depth_roi else "off"}'
+                f'roi={"on" if self.use_depth_roi else "off"} '
+                f'depth_valid={int(np.count_nonzero(np.isfinite(pub_depth_m)))}/{pub_kpts.shape[0]}'
             )
         except Exception as e:
             self.get_logger().error(f'color callback error: {e}')

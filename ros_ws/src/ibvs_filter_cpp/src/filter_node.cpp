@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -102,6 +103,10 @@ private:
     declare_parameter<double>("q_noise", 2.0);
     declare_parameter<double>("r_noise", 1.1);
     declare_parameter<double>("z_depth", 0.25);
+    declare_parameter<bool>("use_depth_from_matches", true);
+    declare_parameter<double>("depth_min_valid_m", 0.05);
+    declare_parameter<double>("depth_max_valid_m", 3.0);
+    declare_parameter<double>("depth_ema_alpha", 0.35);
     declare_parameter<double>("gate_threshold", 20.0);
     declare_parameter<double>("predict_rate", 120.0);
 
@@ -136,7 +141,14 @@ private:
     r_noise_ = get_parameter("r_noise").as_double();
     gate_threshold_ = get_parameter("gate_threshold").as_double();
     z_depth_ = get_parameter("z_depth").as_double();
+    use_depth_from_matches_ = get_parameter("use_depth_from_matches").as_bool();
+    depth_min_valid_m_ = get_parameter("depth_min_valid_m").as_double();
+    depth_max_valid_m_ = get_parameter("depth_max_valid_m").as_double();
+    depth_ema_alpha_ = get_parameter("depth_ema_alpha").as_double();
     predict_rate_ = get_parameter("predict_rate").as_double();
+    if (!has_runtime_depth_) {
+      runtime_z_depth_ = z_depth_;
+    }
 
     max_active_keypoints_ = static_cast<int>(get_parameter("max_active_keypoints").as_int());
     min_init_keypoints_ = static_cast<int>(get_parameter("min_init_keypoints").as_int());
@@ -215,6 +227,10 @@ private:
     double next_r = r_noise_;
     double next_gate = gate_threshold_;
     double next_z = z_depth_;
+    bool next_use_depth_from_matches = use_depth_from_matches_;
+    double next_depth_min_valid_m = depth_min_valid_m_;
+    double next_depth_max_valid_m = depth_max_valid_m_;
+    double next_depth_ema_alpha = depth_ema_alpha_;
     double next_predict_rate = predict_rate_;
 
     int next_active_max = max_active_keypoints_;
@@ -263,6 +279,29 @@ private:
           return result;
         }
         next_z = p.as_double();
+      } else if (p.get_name() == "use_depth_from_matches") {
+        next_use_depth_from_matches = p.as_bool();
+      } else if (p.get_name() == "depth_min_valid_m") {
+        if (p.as_double() <= 0.0) {
+          result.successful = false;
+          result.reason = "depth_min_valid_m must be > 0";
+          return result;
+        }
+        next_depth_min_valid_m = p.as_double();
+      } else if (p.get_name() == "depth_max_valid_m") {
+        if (p.as_double() <= 0.0) {
+          result.successful = false;
+          result.reason = "depth_max_valid_m must be > 0";
+          return result;
+        }
+        next_depth_max_valid_m = p.as_double();
+      } else if (p.get_name() == "depth_ema_alpha") {
+        if (p.as_double() < 0.0 || p.as_double() > 1.0) {
+          result.successful = false;
+          result.reason = "depth_ema_alpha must be in [0, 1]";
+          return result;
+        }
+        next_depth_ema_alpha = p.as_double();
       } else if (p.get_name() == "predict_rate") {
         if (p.as_double() <= 0.0) {
           result.successful = false;
@@ -320,10 +359,20 @@ private:
       }
     }
 
+    if (next_depth_max_valid_m <= next_depth_min_valid_m) {
+      result.successful = false;
+      result.reason = "depth_max_valid_m must be > depth_min_valid_m";
+      return result;
+    }
+
     q_noise_ = next_q;
     r_noise_ = next_r;
     gate_threshold_ = next_gate;
     z_depth_ = next_z;
+    use_depth_from_matches_ = next_use_depth_from_matches;
+    depth_min_valid_m_ = next_depth_min_valid_m;
+    depth_max_valid_m_ = next_depth_max_valid_m;
+    depth_ema_alpha_ = next_depth_ema_alpha;
 
     const bool rate_changed = std::abs(next_predict_rate - predict_rate_) > 1e-12;
     predict_rate_ = next_predict_rate;
@@ -336,6 +385,9 @@ private:
     camera_velocity_deadband_linear_ = next_deadband_lin;
     camera_velocity_deadband_angular_ = next_deadband_ang;
     camera_velocity_stale_timeout_ = next_stale_timeout;
+    if (!has_runtime_depth_) {
+      runtime_z_depth_ = z_depth_;
+    }
 
     if (filter_ != nullptr) {
       std::lock_guard<std::mutex> lock(lock_);
@@ -520,6 +572,21 @@ private:
     return sigma_px;
   }
 
+  static double medianOf(std::vector<double> v)
+  {
+    if (v.empty()) {
+      return std::numeric_limits<double>::quiet_NaN();
+    }
+    const size_t mid = v.size() / 2U;
+    std::nth_element(v.begin(), v.begin() + static_cast<long>(mid), v.end());
+    double med = v[mid];
+    if ((v.size() % 2U) == 0U && mid > 0U) {
+      std::nth_element(v.begin(), v.begin() + static_cast<long>(mid - 1U), v.end());
+      med = 0.5 * (med + v[mid - 1U]);
+    }
+    return med;
+  }
+
   void timerCallback()
   {
     if (filter_ == nullptr || !has_reference_) {
@@ -532,11 +599,22 @@ private:
     std::vector<int64_t> active_ref_ids;
     Eigen::MatrixXd filtered_current_pts;
     std::vector<float> active_sigma_px;
+    std::vector<float> active_depth_m;
     double p_trace = 0.0;
+    double predict_z = z_depth_;
 
     {
       std::lock_guard<std::mutex> lock(lock_);
-      filter_->predict(v_ee, z_depth_, dt);
+      if (
+        use_depth_from_matches_ &&
+        has_runtime_depth_ &&
+        std::isfinite(runtime_z_depth_) &&
+        runtime_z_depth_ > 0.0)
+      {
+        predict_z = runtime_z_depth_;
+      }
+
+      filter_->predict(v_ee, predict_z, dt);
       active_ref_ids = filter_->getActiveRefIds();
       filtered_current_pts = filter_->getActiveFilteredPoints();
 
@@ -544,6 +622,23 @@ private:
       active_sigma_px = extractActivePositionUncertainty(cov, active_ref_ids.size());
       if (cov.rows() > 0 && cov.cols() > 0) {
         p_trace = cov.trace();
+      }
+
+      active_depth_m.reserve(active_ref_ids.size());
+      for (const int64_t rid : active_ref_ids) {
+        float z = static_cast<float>(predict_z);
+        auto it = latest_depth_by_ref_.find(rid);
+        if (it != latest_depth_by_ref_.end()) {
+          const float cand = it->second;
+          if (
+            std::isfinite(cand) &&
+            cand > static_cast<float>(depth_min_valid_m_) &&
+            cand < static_cast<float>(depth_max_valid_m_))
+          {
+            z = cand;
+          }
+        }
+        active_depth_m.push_back(z);
       }
     }
 
@@ -558,12 +653,14 @@ private:
     if (num_pts > 0) {
       out_msg.ref_id.reserve(num_pts);
       out_msg.xy.reserve(2 * num_pts);
+      out_msg.depth_m.reserve(num_pts);
       out_msg.sim.reserve(num_pts);
 
       for (size_t i = 0; i < num_pts; ++i) {
         out_msg.ref_id.push_back(static_cast<uint32_t>(std::max<int64_t>(0, active_ref_ids[i])));
         out_msg.xy.push_back(static_cast<float>(filtered_current_pts(0, static_cast<int>(i))));
         out_msg.xy.push_back(static_cast<float>(filtered_current_pts(1, static_cast<int>(i))));
+        out_msg.depth_m.push_back(active_depth_m[i]);
         out_msg.sim.push_back(active_sigma_px[i]);
       }
     }
@@ -590,8 +687,11 @@ private:
 
     int valid_count = 0;
     const int n_xy_pairs = static_cast<int>(matches_msg->xy.size() / 2);
+    const int n_depth = static_cast<int>(matches_msg->depth_m.size());
     const int n_scores = static_cast<int>(matches_msg->sim.size());
     const int ref_raw_len = static_cast<int>(reference_keypoints_raw_.size());
+    std::vector<double> valid_depth_samples;
+    std::vector<std::pair<int64_t, float>> valid_depth_by_ref;
 
     for (int i = 0; i < num_matches; ++i) {
       const int64_t ref_idx = static_cast<int64_t>(matches_msg->ref_id[static_cast<size_t>(i)]);
@@ -611,6 +711,14 @@ private:
       if (i < n_scores) {
         match_scores(valid_count) = matches_msg->sim[static_cast<size_t>(i)];
       }
+
+      if (i < n_depth) {
+        const double z = static_cast<double>(matches_msg->depth_m[static_cast<size_t>(i)]);
+        if (std::isfinite(z) && z > depth_min_valid_m_ && z < depth_max_valid_m_) {
+          valid_depth_samples.push_back(z);
+          valid_depth_by_ref.emplace_back(ref_idx, static_cast<float>(z));
+        }
+      }
       ++valid_count;
     }
 
@@ -626,6 +734,22 @@ private:
     std::string update_status;
     {
       std::lock_guard<std::mutex> lock(lock_);
+      for (const auto & it : valid_depth_by_ref) {
+        latest_depth_by_ref_[it.first] = it.second;
+      }
+
+      if (use_depth_from_matches_ && !valid_depth_samples.empty()) {
+        const double z_med = medianOf(valid_depth_samples);
+        if (std::isfinite(z_med) && z_med > 0.0) {
+          if (!has_runtime_depth_) {
+            runtime_z_depth_ = z_med;
+            has_runtime_depth_ = true;
+          } else {
+            runtime_z_depth_ =
+              depth_ema_alpha_ * z_med + (1.0 - depth_ema_alpha_) * runtime_z_depth_;
+          }
+        }
+      }
       filter_->update(current_pixels, desired_pixels, ref_ids, match_scores);
       update_status = filter_->getStatus();
     }
@@ -662,6 +786,12 @@ private:
   double r_noise_;
   double gate_threshold_;
   double z_depth_;
+  bool use_depth_from_matches_;
+  double depth_min_valid_m_;
+  double depth_max_valid_m_;
+  double depth_ema_alpha_;
+  double runtime_z_depth_ = 0.25;
+  bool has_runtime_depth_ = false;
   double predict_rate_;
 
   int max_active_keypoints_;
@@ -690,6 +820,7 @@ private:
 
   bool has_reference_ = false;
   std::vector<double> reference_keypoints_raw_;
+  std::unordered_map<int64_t, float> latest_depth_by_ref_;
 
   uint32_t update_step_count_;
   uint32_t update_success_count_;

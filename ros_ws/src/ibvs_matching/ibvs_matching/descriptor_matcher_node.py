@@ -529,6 +529,11 @@ class DescriptorMatcherNode(Node):
         if n == 0:
             return
 
+        if len(msg.depth_m) == n:
+            kpts_depth_m = np.asarray(msg.depth_m, dtype=np.float32)
+        else:
+            kpts_depth_m = np.full((n,), np.nan, dtype=np.float32)
+
         d = int(msg.descriptor_dim)
         if d != self.ref_d or d <= 0:
             self.get_logger().warn(f"Descriptor dim mismatch: got {d}, ref {self.ref_d}.")
@@ -557,6 +562,7 @@ class DescriptorMatcherNode(Node):
 
         out_ref = []
         out_xy = []
+        out_depth_m = []
         out_sim = []
         assigned_cur: set[int] = set()
         assigned_ref: set[int] = set()
@@ -565,6 +571,7 @@ class DescriptorMatcherNode(Node):
             rid = int(best_ref[cur_idx])
             out_ref.append(rid)
             out_xy.append(kpts[cur_idx])
+            out_depth_m.append(float(kpts_depth_m[cur_idx]))
             out_sim.append(float(best_sim[cur_idx]))
             assigned_cur.add(int(cur_idx))
             assigned_ref.add(rid)
@@ -589,6 +596,7 @@ class DescriptorMatcherNode(Node):
                 for rid, cur_idx, sim in rescues:
                     out_ref.append(int(rid))
                     out_xy.append(kpts[int(cur_idx)])
+                    out_depth_m.append(float(kpts_depth_m[int(cur_idx)]))
                     out_sim.append(float(sim))
                 local_applied = len(rescues)
 
@@ -621,6 +629,7 @@ class DescriptorMatcherNode(Node):
         out.header = msg.header
         out.ref_id = np.asarray(out_ref, dtype=np.uint32).tolist()
         out.xy = np.asarray(out_xy, dtype=np.float32).reshape(-1).tolist()
+        out.depth_m = np.asarray(out_depth_m, dtype=np.float32).tolist()
         out.sim = np.asarray(out_sim, dtype=np.float32).tolist()
         self.pub.publish(out)
 

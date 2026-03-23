@@ -12,6 +12,12 @@ echo "Starting the realsense ros driver..."
 # Allow easy profile overrides from compose/.env without editing this script.
 COLOR_PROFILE="${RS_COLOR_PROFILE:-640x480x60}"
 DEPTH_PROFILE="${RS_DEPTH_PROFILE:-640x480x60}"
+CONFIG_FILE="${RS_CONFIG_FILE:-/home/ros/ros2_ws/startup_scripts/realsense_config.json}"
+
+if [ ! -f "${CONFIG_FILE}" ]; then
+  echo "RealSense config file not found: ${CONFIG_FILE}"
+  exit 1
+fi
 
 # Read params from file
 ros2 launch realsense2_camera rs_launch.py \
@@ -21,18 +27,27 @@ ros2 launch realsense2_camera rs_launch.py \
   depth_module.depth_format:=Z16 \
   enable_color:=true \
   rgb_camera.color_profile:=${COLOR_PROFILE} \
-  depth_module.emitter_enabled:=1 \
-  depth_module.enable_auto_exposure:=true \
-  spatial_filter.enable:=true \
-  temporal_filter.enable:=true \
-  hole_filling_filter.enable:=true \
-  spatial_filter.filter_magnitude:=2 \
-  spatial_filter.filter_smooth_alpha:=0.50 \
-  spatial_filter.filter_smooth_delta:=20 \
-  temporal_filter.filter_smooth_alpha:=0.40 \
-  temporal_filter.filter_smooth_delta:=20 \
-  temporal_filter.persistence_control:=2 \
-  hole_filling_filter.holes_fill:=2
+  json_file_path:="${CONFIG_FILE}" \
+
+
 
 # Keep container alive
 wait
+
+  # depth_module.gain:=16 \
+  # depth_module.exposure:=2000 \
+  # json_file_path:="${CONFIG_FILE}" \
+
+
+  # depth_module.emitter_enabled:=1 \
+  # depth_module.enable_auto_exposure:=true \
+  # spatial_filter.enable:=true \
+  # temporal_filter.enable:=true \
+  # hole_filling_filter.enable:=true \
+  # spatial_filter.filter_magnitude:=2 \
+  # spatial_filter.filter_smooth_alpha:=0.50 \
+  # spatial_filter.filter_smooth_delta:=20 \
+  # temporal_filter.filter_smooth_alpha:=0.40 \
+  # temporal_filter.filter_smooth_delta:=20 \
+  # temporal_filter.persistence_control:=2 \
+  # hole_filling_filter.holes_fill:=2

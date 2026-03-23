@@ -686,6 +686,7 @@ docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 
 Start debug overlay node:
 ```bash
 docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_filter filter_debug_node'
+docker exec -it ros_ws bash -lc 'source /home/ros_ws/install/setup.bash && ros2 run ibvs_matching local_rescue_debug'
 ```
 
 Live tuning (without restart):
