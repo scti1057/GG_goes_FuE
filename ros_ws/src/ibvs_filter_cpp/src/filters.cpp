@@ -74,7 +74,8 @@ void ExtendedKalmanFilter::forceRelocalization()
 Eigen::VectorXd ExtendedKalmanFilter::computePixelVelocities(
   const Eigen::VectorXd & state_2n,
   const Eigen::Matrix<double, 6, 1> & v_cam,
-  double z_est) const
+  const Eigen::VectorXd & z_per_feature,
+  double z_fallback) const
 {
   const int l_dim = state_2n.size();
   const int n = l_dim / 2;
@@ -89,9 +90,16 @@ Eigen::VectorXd ExtendedKalmanFilter::computePixelVelocities(
   const Eigen::MatrixXd pts_norm = ibvs_math_.pixelToNormalized(pts_pixel);
 
   for (int i = 0; i < n; ++i) {
+    double z_i = z_fallback;
+    if (i < z_per_feature.size()) {
+      const double cand = z_per_feature(i);
+      if (std::isfinite(cand) && cand > 1e-6) {
+        z_i = cand;
+      }
+    }
     const double x_n = pts_norm(0, i);
     const double y_n = pts_norm(1, i);
-    const Eigen::Matrix<double, 2, 6> L_s = ibvs_math_.getInteractionMatrixPoint(x_n, y_n, z_est);
+    const Eigen::Matrix<double, 2, 6> L_s = ibvs_math_.getInteractionMatrixPoint(x_n, y_n, z_i);
     const Eigen::Vector2d s_dot_norm = L_s * v_cam;
 
     s_dot(2 * i) = s_dot_norm(0) * K_(0, 0);
@@ -101,7 +109,11 @@ Eigen::VectorXd ExtendedKalmanFilter::computePixelVelocities(
   return s_dot;
 }
 
-void ExtendedKalmanFilter::predict(const Eigen::Matrix<double, 6, 1> & v_ee, double z_est, double dt)
+void ExtendedKalmanFilter::predict(
+  const Eigen::Matrix<double, 6, 1> & v_ee,
+  const Eigen::VectorXd & z_per_feature,
+  double z_fallback,
+  double dt)
 {
   if (!initialized_ || x_.size() <= 0) {
     return;
@@ -109,7 +121,7 @@ void ExtendedKalmanFilter::predict(const Eigen::Matrix<double, 6, 1> & v_ee, dou
 
   const Eigen::Matrix<double, 6, 1> v_cam = transformTwistEeToCam(v_ee);
   const Eigen::VectorXd x_old = x_;
-  const Eigen::VectorXd s_dot = computePixelVelocities(x_old, v_cam, z_est);
+  const Eigen::VectorXd s_dot = computePixelVelocities(x_old, v_cam, z_per_feature, z_fallback);
 
   const int l_dim = x_old.size();
   Eigen::MatrixXd F_k = Eigen::MatrixXd::Identity(l_dim, l_dim);
@@ -118,7 +130,11 @@ void ExtendedKalmanFilter::predict(const Eigen::Matrix<double, 6, 1> & v_ee, dou
   for (int i = 0; i < l_dim; ++i) {
     Eigen::VectorXd x_plus = x_old;
     x_plus(i) += epsilon;
-    const Eigen::VectorXd s_dot_plus = computePixelVelocities(x_plus, v_cam, z_est);
+    const Eigen::VectorXd s_dot_plus = computePixelVelocities(
+      x_plus,
+      v_cam,
+      z_per_feature,
+      z_fallback);
     const Eigen::VectorXd diff = (s_dot_plus - s_dot) / epsilon;
     F_k.col(i) += diff * dt;
   }
@@ -307,7 +323,8 @@ void UnscentedKalmanFilter::forceRelocalization()
 Eigen::VectorXd UnscentedKalmanFilter::computePixelVelocities(
   const Eigen::VectorXd & state_2n,
   const Eigen::Matrix<double, 6, 1> & v_cam,
-  double z_est) const
+  const Eigen::VectorXd & z_per_feature,
+  double z_fallback) const
 {
   Eigen::VectorXd s_dot = Eigen::VectorXd::Zero(L_);
 
@@ -319,8 +336,15 @@ Eigen::VectorXd UnscentedKalmanFilter::computePixelVelocities(
 
   const Eigen::MatrixXd pts_norm = ibvs_math_.pixelToNormalized(pts_pixel);
   for (int i = 0; i < (L_ / 2); ++i) {
+    double z_i = z_fallback;
+    if (i < z_per_feature.size()) {
+      const double cand = z_per_feature(i);
+      if (std::isfinite(cand) && cand > 1e-6) {
+        z_i = cand;
+      }
+    }
     const Eigen::Matrix<double, 2, 6> L_s = ibvs_math_.getInteractionMatrixPoint(
-      pts_norm(0, i), pts_norm(1, i), z_est);
+      pts_norm(0, i), pts_norm(1, i), z_i);
     const Eigen::Vector2d s_dot_norm = L_s * v_cam;
 
     s_dot(2 * i) = s_dot_norm(0) * K_(0, 0);
@@ -356,7 +380,11 @@ Eigen::MatrixXd UnscentedKalmanFilter::generateSigmaPoints(const Eigen::VectorXd
   return sigma_points;
 }
 
-void UnscentedKalmanFilter::predict(const Eigen::Matrix<double, 6, 1> & v_ee, double z_est, double dt)
+void UnscentedKalmanFilter::predict(
+  const Eigen::Matrix<double, 6, 1> & v_ee,
+  const Eigen::VectorXd & z_per_feature,
+  double z_fallback,
+  double dt)
 {
   if (!initialized_ || L_ <= 0) {
     return;
@@ -369,7 +397,11 @@ void UnscentedKalmanFilter::predict(const Eigen::Matrix<double, 6, 1> & v_ee, do
 
   for (int i = 0; i < sigmas.cols(); ++i) {
     const Eigen::VectorXd x_i = sigmas.col(i);
-    const Eigen::VectorXd s_dot_i = computePixelVelocities(x_i, v_cam, z_est);
+    const Eigen::VectorXd s_dot_i = computePixelVelocities(
+      x_i,
+      v_cam,
+      z_per_feature,
+      z_fallback);
     sigmas_pred.col(i) = x_i + s_dot_i * dt;
   }
 
@@ -540,7 +572,8 @@ void ErrorStateKalmanFilter::forceRelocalization()
 Eigen::VectorXd ErrorStateKalmanFilter::computePixelVelocities(
   const Eigen::VectorXd & state_2n,
   const Eigen::Matrix<double, 6, 1> & v_cam,
-  double z_est) const
+  const Eigen::VectorXd & z_per_feature,
+  double z_fallback) const
 {
   Eigen::VectorXd s_dot = Eigen::VectorXd::Zero(L_);
 
@@ -552,8 +585,15 @@ Eigen::VectorXd ErrorStateKalmanFilter::computePixelVelocities(
 
   const Eigen::MatrixXd pts_norm = ibvs_math_.pixelToNormalized(pts_pixel);
   for (int i = 0; i < (L_ / 2); ++i) {
+    double z_i = z_fallback;
+    if (i < z_per_feature.size()) {
+      const double cand = z_per_feature(i);
+      if (std::isfinite(cand) && cand > 1e-6) {
+        z_i = cand;
+      }
+    }
     const Eigen::Matrix<double, 2, 6> L_s = ibvs_math_.getInteractionMatrixPoint(
-      pts_norm(0, i), pts_norm(1, i), z_est);
+      pts_norm(0, i), pts_norm(1, i), z_i);
     const Eigen::Vector2d s_dot_norm = L_s * v_cam;
 
     s_dot(2 * i) = s_dot_norm(0) * K_(0, 0);
@@ -565,7 +605,8 @@ Eigen::VectorXd ErrorStateKalmanFilter::computePixelVelocities(
 
 void ErrorStateKalmanFilter::predict(
   const Eigen::Matrix<double, 6, 1> & v_ee,
-  double z_est,
+  const Eigen::VectorXd & z_per_feature,
+  double z_fallback,
   double dt)
 {
   if (!initialized_ || L_ <= 0) {
@@ -575,7 +616,11 @@ void ErrorStateKalmanFilter::predict(
   const Eigen::Matrix<double, 6, 1> v_cam = transformTwistEeToCam(v_ee);
 
   const Eigen::VectorXd x_nom_old = x_nom_;
-  const Eigen::VectorXd s_dot = computePixelVelocities(x_nom_old, v_cam, z_est);
+  const Eigen::VectorXd s_dot = computePixelVelocities(
+    x_nom_old,
+    v_cam,
+    z_per_feature,
+    z_fallback);
   x_nom_ = x_nom_old + s_dot * dt;
 
   Eigen::MatrixXd F_dx = Eigen::MatrixXd::Identity(L_, L_);
@@ -583,7 +628,11 @@ void ErrorStateKalmanFilter::predict(
   for (int i = 0; i < L_; ++i) {
     Eigen::VectorXd x_plus = x_nom_old;
     x_plus(i) += epsilon;
-    const Eigen::VectorXd s_dot_plus = computePixelVelocities(x_plus, v_cam, z_est);
+    const Eigen::VectorXd s_dot_plus = computePixelVelocities(
+      x_plus,
+      v_cam,
+      z_per_feature,
+      z_fallback);
     F_dx.col(i) += ((s_dot_plus - s_dot) / epsilon) * dt;
   }
 
@@ -759,7 +808,8 @@ void StandardKalmanFilter::forceRelocalization()
 
 void StandardKalmanFilter::predict(
   const Eigen::Matrix<double, 6, 1> & /*v_ee*/,
-  double /*z_est*/,
+  const Eigen::VectorXd & /*z_per_feature*/,
+  double /*z_fallback*/,
   double dt)
 {
   if (!initialized_ || state_dim_ <= 0) {

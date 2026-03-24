@@ -18,7 +18,11 @@ public:
 
   void setQRGate(double q_val, double r_val, double gate_thresh_val) override;
   void forceRelocalization() override;
-  void predict(const Eigen::Matrix<double, 6, 1> & v_ee, double z_est, double dt) override;
+  void predict(
+    const Eigen::Matrix<double, 6, 1> & v_ee,
+    const Eigen::VectorXd & z_per_feature,
+    double z_fallback,
+    double dt) override;
   void update(
     const Eigen::MatrixXd & current_pixels,
     const Eigen::MatrixXd & desired_pixels,
@@ -34,7 +38,8 @@ private:
   Eigen::VectorXd computePixelVelocities(
     const Eigen::VectorXd & state_2n,
     const Eigen::Matrix<double, 6, 1> & v_cam,
-    double z_est) const;
+    const Eigen::VectorXd & z_per_feature,
+    double z_fallback) const;
   Eigen::MatrixXd buildObservationMatrix(const std::vector<int> & obs_slots) const;
 
   IBVSMath ibvs_math_;
@@ -54,7 +59,11 @@ public:
 
   void setQRGate(double q_val, double r_val, double gate_thresh_val) override;
   void forceRelocalization() override;
-  void predict(const Eigen::Matrix<double, 6, 1> & v_ee, double z_est, double dt) override;
+  void predict(
+    const Eigen::Matrix<double, 6, 1> & v_ee,
+    const Eigen::VectorXd & z_per_feature,
+    double z_fallback,
+    double dt) override;
   void update(
     const Eigen::MatrixXd & current_pixels,
     const Eigen::MatrixXd & desired_pixels,
@@ -71,7 +80,8 @@ private:
   Eigen::VectorXd computePixelVelocities(
     const Eigen::VectorXd & state_2n,
     const Eigen::Matrix<double, 6, 1> & v_cam,
-    double z_est) const;
+    const Eigen::VectorXd & z_per_feature,
+    double z_fallback) const;
   Eigen::MatrixXd generateSigmaPoints(const Eigen::VectorXd & x, Eigen::MatrixXd P);
   Eigen::MatrixXd buildObservationMatrix(const std::vector<int> & obs_slots) const;
 
@@ -100,7 +110,11 @@ public:
 
   void setQRGate(double q_val, double r_val, double gate_thresh_val) override;
   void forceRelocalization() override;
-  void predict(const Eigen::Matrix<double, 6, 1> & v_ee, double z_est, double dt) override;
+  void predict(
+    const Eigen::Matrix<double, 6, 1> & v_ee,
+    const Eigen::VectorXd & z_per_feature,
+    double z_fallback,
+    double dt) override;
   void update(
     const Eigen::MatrixXd & current_pixels,
     const Eigen::MatrixXd & desired_pixels,
@@ -116,7 +130,8 @@ private:
   Eigen::VectorXd computePixelVelocities(
     const Eigen::VectorXd & state_2n,
     const Eigen::Matrix<double, 6, 1> & v_cam,
-    double z_est) const;
+    const Eigen::VectorXd & z_per_feature,
+    double z_fallback) const;
   Eigen::MatrixXd buildObservationMatrix(const std::vector<int> & obs_slots) const;
 
   IBVSMath ibvs_math_;
@@ -138,7 +153,11 @@ public:
 
   void setQRGate(double q_val, double r_val, double gate_thresh_val) override;
   void forceRelocalization() override;
-  void predict(const Eigen::Matrix<double, 6, 1> & v_ee, double z_est, double dt) override;
+  void predict(
+    const Eigen::Matrix<double, 6, 1> & v_ee,
+    const Eigen::VectorXd & z_per_feature,
+    double z_fallback,
+    double dt) override;
   void update(
     const Eigen::MatrixXd & current_pixels,
     const Eigen::MatrixXd & desired_pixels,

@@ -172,6 +172,10 @@ class IbvsSessionManager:
             f"match_threshold:={self.args.match_threshold}",
             "-p",
             f"mutual_check:={'true' if self.args.mutual_check else 'false'}",
+            "-p",
+            f"prefilter_enabled:={'true' if self.args.prefilter_enabled else 'false'}",
+            "-p",
+            f"prefilter_top_k:={self.args.prefilter_top_k}",
         ]
 
         matches_viz_cmd = [
@@ -240,6 +244,11 @@ class IbvsSessionManager:
 
     def _refresh_filter_cmd(self) -> None:
         self.processes["filter_node"].cmd = self._build_filter_cmd()
+
+    def _refresh_tracking_cmds(self) -> None:
+        rebuilt = self._build_processes()
+        self.processes["descriptor_matcher"].cmd = rebuilt["descriptor_matcher"].cmd
+        self.processes["matches_viz"].cmd = rebuilt["matches_viz"].cmd
 
     def start_filter(self) -> None:
         self._refresh_filter_cmd()
@@ -409,6 +418,122 @@ class IbvsSessionManager:
             return False
         print(f"  - OK: local_rescue_mode={current}")
         return True
+
+    def get_prefilter_enabled(self) -> Optional[bool]:
+        cmd = [
+            "ros2",
+            "param",
+            "get",
+            self.args.descriptor_matcher_node,
+            "prefilter_enabled",
+        ]
+        rc, out = run_cmd(cmd, timeout_sec=float(self.args.descriptor_param_timeout))
+        if rc != 0:
+            return None
+        return self._parse_ros_bool_param_get(out)
+
+    def get_prefilter_top_k(self) -> Optional[int]:
+        cmd = [
+            "ros2",
+            "param",
+            "get",
+            self.args.descriptor_matcher_node,
+            "prefilter_top_k",
+        ]
+        rc, out = run_cmd(cmd, timeout_sec=float(self.args.descriptor_param_timeout))
+        if rc != 0:
+            return None
+        m = re.search(r"integer value is:\s*([0-9]+)", out, flags=re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        return None
+
+    def set_prefilter_enabled(self, enabled: bool) -> bool:
+        cmd_set = [
+            "ros2",
+            "param",
+            "set",
+            self.args.descriptor_matcher_node,
+            "prefilter_enabled",
+            "true" if enabled else "false",
+        ]
+        rc_set, out_set = run_cmd(cmd_set, timeout_sec=float(self.args.descriptor_param_timeout))
+        if rc_set != 0:
+            short = out_set.splitlines()[-1] if out_set else "(kein output)"
+            print(f"  - FEHLER beim Setzen von prefilter_enabled: {short}")
+            return False
+        current = self.get_prefilter_enabled()
+        if current is None:
+            print("  - WARN: gesetzt, aber Rücklesen fehlgeschlagen")
+            return True
+        if current != enabled:
+            print(f"  - WARN: Rücklesen={current}, erwartet={enabled}")
+            return False
+        self.args.prefilter_enabled = bool(enabled)
+        self._refresh_tracking_cmds()
+        print(f"  - OK: prefilter_enabled={current}")
+        return True
+
+    def set_prefilter_top_k(self, top_k: int) -> bool:
+        top_k = max(1, int(top_k))
+        cmd_set = [
+            "ros2",
+            "param",
+            "set",
+            self.args.descriptor_matcher_node,
+            "prefilter_top_k",
+            str(top_k),
+        ]
+        rc_set, out_set = run_cmd(cmd_set, timeout_sec=float(self.args.descriptor_param_timeout))
+        if rc_set != 0:
+            short = out_set.splitlines()[-1] if out_set else "(kein output)"
+            print(f"  - FEHLER beim Setzen von prefilter_top_k: {short}")
+            return False
+        current = self.get_prefilter_top_k()
+        if current is None:
+            print("  - WARN: gesetzt, aber Rücklesen fehlgeschlagen")
+            return True
+        if current != top_k:
+            print(f"  - WARN: Rücklesen={current}, erwartet={top_k}")
+            return False
+        self.args.prefilter_top_k = int(top_k)
+        self._refresh_tracking_cmds()
+        print(f"  - OK: prefilter_top_k={current}")
+        return True
+
+    def prefilter_menu(self) -> None:
+        while True:
+            current_enabled = self.get_prefilter_enabled()
+            current_top_k = self.get_prefilter_top_k()
+            current_enabled_str = (
+                str(current_enabled).lower()
+                if current_enabled is not None else "unbekannt (Node nicht erreichbar?)"
+            )
+            current_top_k_str = str(current_top_k) if current_top_k is not None else "unbekannt"
+
+            print("\n--- Prefilter Mode ---")
+            print(f"  Node: {self.args.descriptor_matcher_node}")
+            print(f"  Aktuell: enabled={current_enabled_str}, top_k={current_top_k_str}")
+            print("  1) prefilter OFF")
+            print("  2) prefilter ON")
+            print("  3) prefilter_top_k setzen")
+            print("  b) Zurück")
+
+            choice = input("\nAuswahl: ").strip().lower()
+            if choice == "1":
+                self.set_prefilter_enabled(False)
+            elif choice == "2":
+                self.set_prefilter_enabled(True)
+            elif choice == "3":
+                raw = input("  Neuer top_k (>=1): ").strip()
+                if not raw.isdigit() or int(raw) < 1:
+                    print("  - Ungültiger top_k.")
+                    continue
+                self.set_prefilter_top_k(int(raw))
+            elif choice == "b":
+                return
+            else:
+                print("  - Unbekannte Eingabe.")
 
     def local_rescue_mode_menu(self) -> None:
         while True:
@@ -771,6 +896,7 @@ class IbvsSessionManager:
         print("  6) Alle Nodes stoppen")
         print("  7) Filter Menü (ibvs_filter_cpp)")
         print("  8) local_rescue_mode setzen (descriptor_matcher)")
+        print("  9) prefilter setzen (descriptor_matcher)")
         print("  q) Beenden (stoppt ebenfalls alle Nodes)")
 
     def run(self) -> int:
@@ -804,6 +930,8 @@ class IbvsSessionManager:
                     self.filter_menu()
                 elif choice == "8":
                     self.local_rescue_mode_menu()
+                elif choice == "9":
+                    self.prefilter_menu()
                 elif choice == "q":
                     print("\nBeende Manager und stoppe alle Nodes ...")
                     self.stop_all()
@@ -843,6 +971,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--match-threshold", type=float, default=0.85)
     parser.add_argument("--mutual-check", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--prefilter-enabled", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--prefilter-top-k", type=int, default=100)
     parser.add_argument("--descriptor-matcher-node", default="/descriptor_matcher_node")
     parser.add_argument("--descriptor-param-timeout", type=float, default=6.0)
 
@@ -856,7 +986,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--filter-gate-threshold", type=float, default=20.0)
     parser.add_argument("--filter-z-depth", type=float, default=0.25)
     parser.add_argument("--filter-predict-rate", type=float, default=120.0)
-    parser.add_argument("--filter-max-active-keypoints", type=int, default=12)
+    parser.add_argument("--filter-max-active-keypoints", type=int, default=30)
     parser.add_argument("--filter-min-init-keypoints", type=int, default=8)
     parser.add_argument("--filter-min-update-keypoints", type=int, default=1)
 
@@ -890,7 +1020,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--keypoint-param-retries", type=int, default=3)
     parser.add_argument("--keypoint-param-retry-wait", type=float, default=0.5)
     parser.add_argument("--keypoint-param-settle", type=float, default=0.25)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.prefilter_top_k < 1:
+        parser.error("--prefilter-top-k must be >= 1")
+    return args
 
 
 def main() -> int:

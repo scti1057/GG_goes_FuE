@@ -39,7 +39,11 @@ public:
   const std::string & getStatus() const { return status_; }
 
   virtual void setQRGate(double q_val, double r_val, double gate_thresh_val) = 0;
-  virtual void predict(const Eigen::Matrix<double, 6, 1> & v_ee, double z_est, double dt) = 0;
+  virtual void predict(
+    const Eigen::Matrix<double, 6, 1> & v_ee,
+    const Eigen::VectorXd & z_per_feature,
+    double z_fallback,
+    double dt) = 0;
   virtual void update(
     const Eigen::MatrixXd & current_pixels,
     const Eigen::MatrixXd & desired_pixels,

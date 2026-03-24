@@ -1,3 +1,6 @@
+from collections import deque
+from dataclasses import dataclass, field
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -16,6 +19,16 @@ from ibvs_msgs.msg import (
 def l2_normalize(mat: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     n = np.linalg.norm(mat, axis=1, keepdims=True)
     return mat / (n + eps)
+
+
+@dataclass
+class PrefilterTrack:
+    score_ema: float = 0.0
+    last_seen_frame: int = -1
+    hit_frames: deque = field(default_factory=deque)
+    last_xy: np.ndarray = field(default_factory=lambda: np.zeros((2,), dtype=np.float32))
+    last_depth_m: float = float("nan")
+    last_sim: float = 0.0
 
 
 class DescriptorMatcherNode(Node):
@@ -69,6 +82,24 @@ class DescriptorMatcherNode(Node):
         self.declare_parameter("publish_local_rescue_debug", True)
         self.declare_parameter("local_rescue_debug_topic", "/ibvs/matching/local_rescue_debug")
         self.declare_parameter("local_rescue_debug_max_candidates_per_entry", 8)
+        self.declare_parameter("prefilter_enabled", False)
+        self.declare_parameter("prefilter_top_k", 100)
+        self.declare_parameter("prefilter_window_frames", 180)
+        self.declare_parameter("prefilter_score_ema_beta", 0.80)
+        self.declare_parameter("prefilter_missed_tau_frames", 6.0)
+        self.declare_parameter("prefilter_motion_sigma_px", 20.0)
+        self.declare_parameter("prefilter_depth_sigma_m", 0.06)
+        self.declare_parameter("prefilter_sim_floor", 0.60)
+        self.declare_parameter("prefilter_min_valid_depth_m", 0.05)
+        self.declare_parameter("prefilter_max_valid_depth_m", 3.0)
+        self.declare_parameter("prefilter_weight_rel", 0.35)
+        self.declare_parameter("prefilter_weight_miss", 0.20)
+        self.declare_parameter("prefilter_weight_sim", 0.30)
+        self.declare_parameter("prefilter_weight_motion", 0.10)
+        self.declare_parameter("prefilter_weight_depth", 0.05)
+        self.declare_parameter("prefilter_track_ttl_frames", 540)
+        self.declare_parameter("prefilter_max_tracks", 4000)
+        self.declare_parameter("prefilter_log_period_sec", 2.0)
 
         self.ref_desc = None
         self.ref_d = 0
@@ -82,6 +113,9 @@ class DescriptorMatcherNode(Node):
         self.total_rescue_attempts = 0
         self.total_rescue_successes = 0
         self.total_rescue_rejects = 0
+        self.prefilter_tracks: dict[int, PrefilterTrack] = {}
+        self.prefilter_frame_idx: int = 0
+        self.prefilter_last_log_sec: float = -1.0
 
         kp_topic = str(self.get_parameter("keypoints_topic").value)
         ref_topic = str(self.get_parameter("reference_topic").value)
@@ -158,6 +192,11 @@ class DescriptorMatcherNode(Node):
         self.get_logger().info(f"Sub filtered:   {filtered_topic}")
         self.get_logger().info(f"Sub filter unc: {filter_unc_topic}")
         self.get_logger().info(f"Pub matches:    {out_topic}")
+        self.get_logger().info(
+            "Prefilter: "
+            f"{'on' if bool(self.get_parameter('prefilter_enabled').value) else 'off'} "
+            f"(top_k={int(self.get_parameter('prefilter_top_k').value)})"
+        )
         if self.pub_local_debug is not None:
             self.get_logger().info(
                 f"Pub rescue dbg: {str(self.get_parameter('local_rescue_debug_topic').value)}"
@@ -223,6 +262,239 @@ class DescriptorMatcherNode(Node):
         radius = max(0.1, float(radius))
         sim_thr = max(sim_floor, min(1.0, float(sim_thr)))
         return radius, sim_thr
+
+    def _prefilter_enabled(self) -> bool:
+        return bool(self.get_parameter("prefilter_enabled").value)
+
+    def _prefilter_prune_tracks(self):
+        if not self.prefilter_tracks:
+            return
+        ttl = max(1, int(self.get_parameter("prefilter_track_ttl_frames").value))
+        max_tracks = max(16, int(self.get_parameter("prefilter_max_tracks").value))
+        frame_now = self.prefilter_frame_idx
+
+        stale = [
+            rid for rid, tr in self.prefilter_tracks.items()
+            if tr.last_seen_frame >= 0 and (frame_now - tr.last_seen_frame) > ttl
+        ]
+        for rid in stale:
+            self.prefilter_tracks.pop(rid, None)
+
+        if len(self.prefilter_tracks) <= max_tracks:
+            return
+
+        order = sorted(
+            self.prefilter_tracks.items(),
+            key=lambda kv: (kv[1].last_seen_frame, kv[1].score_ema),
+        )
+        remove_n = len(self.prefilter_tracks) - max_tracks
+        for rid, _ in order[:remove_n]:
+            self.prefilter_tracks.pop(rid, None)
+
+    def _prefilter_deduplicate_current(
+        self,
+        out_ref,
+        out_xy,
+        out_depth_m,
+        out_sim,
+    ):
+        best_by_ref: dict[int, int] = {}
+        for i, rid in enumerate(out_ref):
+            rid_i = int(rid)
+            if rid_i not in best_by_ref:
+                best_by_ref[rid_i] = i
+                continue
+            prev_i = best_by_ref[rid_i]
+            if float(out_sim[i]) > float(out_sim[prev_i]):
+                best_by_ref[rid_i] = i
+
+        idx = list(best_by_ref.values())
+        if not idx:
+            return [], [], [], []
+        return (
+            [int(out_ref[i]) for i in idx],
+            [out_xy[i] for i in idx],
+            [float(out_depth_m[i]) for i in idx],
+            [float(out_sim[i]) for i in idx],
+        )
+
+    @staticmethod
+    def _safe_exp_arg(v: float) -> float:
+        return float(np.clip(v, -60.0, 60.0))
+
+    def _prefilter_normalize_sim(self, sim: float) -> float:
+        floor = float(self.get_parameter("prefilter_sim_floor").value)
+        floor = float(np.clip(floor, 0.0, 0.999))
+        if sim <= floor:
+            return 0.0
+        return float(np.clip((sim - floor) / max(1e-6, 1.0 - floor), 0.0, 1.0))
+
+    def _prefilter_depth_quality(self, depth_m: float, prev_depth_m: float) -> float:
+        min_depth = float(self.get_parameter("prefilter_min_valid_depth_m").value)
+        max_depth = float(self.get_parameter("prefilter_max_valid_depth_m").value)
+        depth_sigma = max(1e-4, float(self.get_parameter("prefilter_depth_sigma_m").value))
+        if not np.isfinite(depth_m) or depth_m <= min_depth or depth_m >= max_depth:
+            return 0.0
+        if not np.isfinite(prev_depth_m):
+            return 1.0
+        jump = abs(float(depth_m) - float(prev_depth_m))
+        return float(np.exp(self._safe_exp_arg(-jump / depth_sigma)))
+
+    def _prefilter_score_components(
+        self,
+        track: PrefilterTrack,
+        xy: np.ndarray,
+        depth_m: float,
+        sim: float,
+    ):
+        beta = float(np.clip(float(self.get_parameter("prefilter_score_ema_beta").value), 0.0, 0.999))
+        window = max(1, int(self.get_parameter("prefilter_window_frames").value))
+        tau_miss = max(1e-3, float(self.get_parameter("prefilter_missed_tau_frames").value))
+        motion_sigma = max(1e-3, float(self.get_parameter("prefilter_motion_sigma_px").value))
+        frame_now = self.prefilter_frame_idx
+
+        if track.last_seen_frame < 0:
+            missed = 0
+        else:
+            missed = max(0, frame_now - track.last_seen_frame - 1)
+        f_miss = float(np.exp(self._safe_exp_arg(-float(missed) / tau_miss)))
+
+        cutoff = frame_now - window + 1
+        while track.hit_frames and track.hit_frames[0] < cutoff:
+            track.hit_frames.popleft()
+        track.hit_frames.append(frame_now)
+        denom = max(1, min(window, frame_now + 1))
+        f_rel = float(len(track.hit_frames)) / float(denom)
+
+        f_sim = self._prefilter_normalize_sim(float(sim))
+
+        if track.last_seen_frame < 0:
+            f_motion = 1.0
+        else:
+            motion_px = float(np.linalg.norm(xy.astype(np.float32) - track.last_xy))
+            f_motion = float(np.exp(self._safe_exp_arg(-motion_px / motion_sigma)))
+
+        f_depth = self._prefilter_depth_quality(float(depth_m), float(track.last_depth_m))
+
+        w_rel = max(0.0, float(self.get_parameter("prefilter_weight_rel").value))
+        w_miss = max(0.0, float(self.get_parameter("prefilter_weight_miss").value))
+        w_sim = max(0.0, float(self.get_parameter("prefilter_weight_sim").value))
+        w_motion = max(0.0, float(self.get_parameter("prefilter_weight_motion").value))
+        w_depth = max(0.0, float(self.get_parameter("prefilter_weight_depth").value))
+        w_sum = w_rel + w_miss + w_sim + w_motion + w_depth
+        if w_sum <= 1e-9:
+            w_rel, w_miss, w_sim, w_motion, w_depth = 0.35, 0.2, 0.3, 0.1, 0.05
+            w_sum = 1.0
+
+        score_inst = (
+            w_rel * f_rel +
+            w_miss * f_miss +
+            w_sim * f_sim +
+            w_motion * f_motion +
+            w_depth * f_depth
+        ) / w_sum
+
+        if track.last_seen_frame < 0:
+            score_ema = float(score_inst)
+        else:
+            score_ema = float(beta * track.score_ema + (1.0 - beta) * score_inst)
+
+        return score_ema, score_inst, missed, f_rel, f_miss, f_sim, f_motion, f_depth
+
+    def _apply_prefilter(
+        self,
+        out_ref,
+        out_xy,
+        out_depth_m,
+        out_sim,
+    ):
+        if not out_ref:
+            self._prefilter_prune_tracks()
+            return out_ref, out_xy, out_depth_m, out_sim, None
+
+        out_ref, out_xy, out_depth_m, out_sim = self._prefilter_deduplicate_current(
+            out_ref, out_xy, out_depth_m, out_sim
+        )
+        if not out_ref:
+            self._prefilter_prune_tracks()
+            return out_ref, out_xy, out_depth_m, out_sim, None
+
+        scored = []
+        for i, rid in enumerate(out_ref):
+            rid_i = int(rid)
+            track = self.prefilter_tracks.get(rid_i)
+            if track is None:
+                track = PrefilterTrack()
+                self.prefilter_tracks[rid_i] = track
+
+            xy_i = np.asarray(out_xy[i], dtype=np.float32)
+            depth_i = float(out_depth_m[i])
+            sim_i = float(out_sim[i])
+
+            score_ema, score_inst, missed, f_rel, f_miss, f_sim, f_motion, f_depth = (
+                self._prefilter_score_components(track, xy_i, depth_i, sim_i)
+            )
+
+            track.score_ema = score_ema
+            track.last_seen_frame = self.prefilter_frame_idx
+            track.last_xy = xy_i
+            track.last_depth_m = depth_i
+            track.last_sim = sim_i
+
+            scored.append(
+                (
+                    score_ema,
+                    rid_i,
+                    out_xy[i],
+                    depth_i,
+                    sim_i,
+                    score_inst,
+                    missed,
+                    f_rel,
+                    f_miss,
+                    f_sim,
+                    f_motion,
+                    f_depth,
+                )
+            )
+
+        self._prefilter_prune_tracks()
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        top_k = max(1, int(self.get_parameter("prefilter_top_k").value))
+        keep = scored[:top_k]
+
+        out_ref_f = [int(s[1]) for s in keep]
+        out_xy_f = [s[2] for s in keep]
+        out_depth_f = [float(s[3]) for s in keep]
+        out_sim_f = [float(s[4]) for s in keep]
+
+        info = {
+            "in_count": int(len(scored)),
+            "out_count": int(len(keep)),
+            "top_score": float(keep[0][0]) if keep else 0.0,
+            "mean_score_out": float(np.mean([s[0] for s in keep])) if keep else 0.0,
+            "mean_rel_out": float(np.mean([s[7] for s in keep])) if keep else 0.0,
+            "mean_missed_out": float(np.mean([s[6] for s in keep])) if keep else 0.0,
+            "tracks_total": int(len(self.prefilter_tracks)),
+            "top_k": int(top_k),
+        }
+        return out_ref_f, out_xy_f, out_depth_f, out_sim_f, info
+
+    def _maybe_log_prefilter(self, info):
+        if info is None:
+            return
+        now = self._now_sec()
+        period = max(0.2, float(self.get_parameter("prefilter_log_period_sec").value))
+        if self.prefilter_last_log_sec > 0.0 and (now - self.prefilter_last_log_sec) < period:
+            return
+        self.prefilter_last_log_sec = now
+        self.get_logger().info(
+            "prefilter "
+            f"in={info['in_count']} out={info['out_count']} top_k={info['top_k']} "
+            f"score_mean={info['mean_score_out']:.3f} rel_mean={info['mean_rel_out']:.3f} "
+            f"missed_mean={info['mean_missed_out']:.2f} tracks={info['tracks_total']}"
+        )
 
     def on_reference(self, msg: Keypoints):
         xy = np.asarray(msg.xy, dtype=np.float32)
@@ -526,6 +798,9 @@ class DescriptorMatcherNode(Node):
             return
         kpts = xy.reshape(-1, 2)
         n = kpts.shape[0]
+        self.prefilter_frame_idx += 1
+        if self._prefilter_enabled():
+            self._prefilter_prune_tracks()
         if n == 0:
             return
 
@@ -599,6 +874,16 @@ class DescriptorMatcherNode(Node):
                     out_depth_m.append(float(kpts_depth_m[int(cur_idx)]))
                     out_sim.append(float(sim))
                 local_applied = len(rescues)
+
+        prefilter_info = None
+        if self._prefilter_enabled() and out_ref:
+            out_ref, out_xy, out_depth_m, out_sim, prefilter_info = self._apply_prefilter(
+                out_ref,
+                out_xy,
+                out_depth_m,
+                out_sim,
+            )
+            self._maybe_log_prefilter(prefilter_info)
 
         final_count = len(out_ref)
         self._publish_local_rescue_debug(

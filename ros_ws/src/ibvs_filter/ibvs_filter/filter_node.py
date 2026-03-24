@@ -30,7 +30,7 @@ class FilterNode(Node):
         self.declare_parameter('gate_threshold', 20.0)
         self.declare_parameter('predict_rate', 120.0)
 
-        self.declare_parameter('max_active_keypoints', 10)
+        self.declare_parameter('max_active_keypoints', 20)
         self.declare_parameter('min_init_keypoints', 8)
         self.declare_parameter('min_update_keypoints', 4)
         self.declare_parameter('force_relocalization', False)

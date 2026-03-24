@@ -110,7 +110,7 @@ private:
     declare_parameter<double>("gate_threshold", 20.0);
     declare_parameter<double>("predict_rate", 120.0);
 
-    declare_parameter<int64_t>("max_active_keypoints", 10);
+    declare_parameter<int64_t>("max_active_keypoints", 20);
     declare_parameter<int64_t>("min_init_keypoints", 8);
     declare_parameter<int64_t>("min_update_keypoints", 4);
     declare_parameter<bool>("force_relocalization", false);
@@ -399,6 +399,10 @@ private:
 
       if (relocalization_requested) {
         filter_->forceRelocalization();
+        measured_depth_by_ref_.clear();
+        predicted_depth_by_ref_.clear();
+        depth_measurement_epoch_ = 0;
+        depth_measurement_consumed_epoch_ = 0;
         last_update_status_ = "RELOCALIZATION REQUESTED";
         RCLCPP_WARN(
           get_logger(),
@@ -440,6 +444,10 @@ private:
     if (filter_ != nullptr) {
       std::lock_guard<std::mutex> lock(lock_);
       filter_->forceRelocalization();
+      measured_depth_by_ref_.clear();
+      predicted_depth_by_ref_.clear();
+      depth_measurement_epoch_ = 0;
+      depth_measurement_consumed_epoch_ = 0;
     }
   }
 
@@ -587,6 +595,62 @@ private:
     return med;
   }
 
+  static bool isDepthValid(double z, double z_min, double z_max)
+  {
+    return std::isfinite(z) && z > z_min && z < z_max;
+  }
+
+  static Eigen::Matrix<double, 6, 1> transformTwistEeToCam(
+    const Eigen::Matrix<double, 6, 1> & v_ee)
+  {
+    Eigen::Matrix<double, 6, 1> out;
+    out << -v_ee(0), v_ee(1), v_ee(2), v_ee(3), v_ee(4), -v_ee(5);
+    return out;
+  }
+
+  Eigen::VectorXd predictDepthVector(
+    const Eigen::MatrixXd & pts_pixel,
+    const Eigen::VectorXd & z_in,
+    const Eigen::Matrix<double, 6, 1> & v_ee,
+    double dt,
+    double z_fallback) const
+  {
+    const int n = static_cast<int>(pts_pixel.cols());
+    Eigen::VectorXd out = Eigen::VectorXd::Constant(n, z_fallback);
+    if (n <= 0 || pts_pixel.rows() != 2) {
+      return out;
+    }
+
+    const Eigen::Matrix<double, 6, 1> v_cam = transformTwistEeToCam(v_ee);
+    const Eigen::Matrix3d K_inv = K_.inverse();
+
+    for (int i = 0; i < n; ++i) {
+      double z_i = z_fallback;
+      if (i < z_in.size()) {
+        const double cand = z_in(i);
+        if (isDepthValid(cand, depth_min_valid_m_, depth_max_valid_m_)) {
+          z_i = cand;
+        }
+      }
+
+      Eigen::Vector3d p_h;
+      p_h << pts_pixel(0, i), pts_pixel(1, i), 1.0;
+      const Eigen::Vector3d p_n = K_inv * p_h;
+      const double x_n = p_n(0);
+      const double y_n = p_n(1);
+
+      const double z_dot = -v_cam(2) + z_i * (v_cam(4) * x_n - v_cam(3) * y_n);
+      double z_next = z_i + z_dot * dt;
+      if (!std::isfinite(z_next)) {
+        z_next = z_i;
+      }
+      z_next = std::clamp(z_next, depth_min_valid_m_, depth_max_valid_m_);
+      out(i) = z_next;
+    }
+
+    return out;
+  }
+
   void timerCallback()
   {
     if (filter_ == nullptr || !has_reference_) {
@@ -602,6 +666,7 @@ private:
     std::vector<float> active_depth_m;
     double p_trace = 0.0;
     double predict_z = z_depth_;
+    bool use_measured_this_cycle = false;
 
     {
       std::lock_guard<std::mutex> lock(lock_);
@@ -614,7 +679,63 @@ private:
         predict_z = runtime_z_depth_;
       }
 
-      filter_->predict(v_ee, predict_z, dt);
+      const std::vector<int64_t> active_ref_ids_before = filter_->getActiveRefIds();
+      const Eigen::MatrixXd filtered_pts_before = filter_->getActiveFilteredPoints();
+      const size_t pre_cols = static_cast<size_t>(
+        filtered_pts_before.cols() > 0 ? filtered_pts_before.cols() : 0);
+      const size_t pre_n = std::min(
+        active_ref_ids_before.size(),
+        pre_cols);
+
+      Eigen::VectorXd z_per_feature = Eigen::VectorXd::Constant(
+        static_cast<Eigen::Index>(pre_n),
+        predict_z);
+
+      use_measured_this_cycle = (depth_measurement_epoch_ != depth_measurement_consumed_epoch_);
+      for (size_t i = 0; i < pre_n; ++i) {
+        const int64_t rid = active_ref_ids_before[i];
+        double z_sel = predict_z;
+        if (use_measured_this_cycle) {
+          const auto mit = measured_depth_by_ref_.find(rid);
+          if (mit != measured_depth_by_ref_.end()) {
+            z_sel = static_cast<double>(mit->second);
+          } else {
+            const auto pit = predicted_depth_by_ref_.find(rid);
+            if (pit != predicted_depth_by_ref_.end()) {
+              z_sel = static_cast<double>(pit->second);
+            }
+          }
+        } else {
+          const auto pit = predicted_depth_by_ref_.find(rid);
+          if (pit != predicted_depth_by_ref_.end()) {
+            z_sel = static_cast<double>(pit->second);
+          }
+        }
+        if (!isDepthValid(z_sel, depth_min_valid_m_, depth_max_valid_m_)) {
+          z_sel = predict_z;
+        }
+        z_per_feature(static_cast<Eigen::Index>(i)) = z_sel;
+      }
+
+      filter_->predict(v_ee, z_per_feature, predict_z, dt);
+
+      if (pre_n > 0) {
+        const Eigen::VectorXd z_pred = predictDepthVector(
+          filtered_pts_before.leftCols(static_cast<Eigen::Index>(pre_n)),
+          z_per_feature,
+          v_ee,
+          dt,
+          predict_z);
+        for (size_t i = 0; i < pre_n; ++i) {
+          const double z_new = z_pred(static_cast<Eigen::Index>(i));
+          if (isDepthValid(z_new, depth_min_valid_m_, depth_max_valid_m_)) {
+            predicted_depth_by_ref_[active_ref_ids_before[i]] = static_cast<float>(z_new);
+          }
+        }
+      }
+
+      depth_measurement_consumed_epoch_ = depth_measurement_epoch_;
+
       active_ref_ids = filter_->getActiveRefIds();
       filtered_current_pts = filter_->getActiveFilteredPoints();
 
@@ -627,19 +748,47 @@ private:
       active_depth_m.reserve(active_ref_ids.size());
       for (const int64_t rid : active_ref_ids) {
         float z = static_cast<float>(predict_z);
-        auto it = latest_depth_by_ref_.find(rid);
-        if (it != latest_depth_by_ref_.end()) {
-          const float cand = it->second;
-          if (
-            std::isfinite(cand) &&
-            cand > static_cast<float>(depth_min_valid_m_) &&
-            cand < static_cast<float>(depth_max_valid_m_))
-          {
-            z = cand;
+        bool has_depth = false;
+        if (use_measured_this_cycle) {
+          const auto mit = measured_depth_by_ref_.find(rid);
+          if (mit != measured_depth_by_ref_.end()) {
+            const float cand = mit->second;
+            if (isDepthValid(cand, depth_min_valid_m_, depth_max_valid_m_)) {
+              z = cand;
+              has_depth = true;
+            }
           }
+        }
+        if (!has_depth) {
+          const auto pit = predicted_depth_by_ref_.find(rid);
+          if (pit != predicted_depth_by_ref_.end()) {
+            const float cand = pit->second;
+            if (isDepthValid(cand, depth_min_valid_m_, depth_max_valid_m_)) {
+              z = cand;
+              has_depth = true;
+            }
+          }
+        }
+        if (!has_depth && !isDepthValid(z, depth_min_valid_m_, depth_max_valid_m_)) {
+          z = static_cast<float>(z_depth_);
         }
         active_depth_m.push_back(z);
       }
+
+      std::unordered_map<int64_t, float> predicted_pruned;
+      predicted_pruned.reserve(active_ref_ids.size());
+      for (size_t i = 0; i < active_ref_ids.size(); ++i) {
+        const int64_t rid = active_ref_ids[i];
+        if (i < active_depth_m.size() && isDepthValid(active_depth_m[i], depth_min_valid_m_, depth_max_valid_m_)) {
+          predicted_pruned[rid] = active_depth_m[i];
+        } else {
+          const auto pit = predicted_depth_by_ref_.find(rid);
+          if (pit != predicted_depth_by_ref_.end()) {
+            predicted_pruned[rid] = pit->second;
+          }
+        }
+      }
+      predicted_depth_by_ref_.swap(predicted_pruned);
     }
 
     ibvs_msgs::msg::Matches out_msg;
@@ -734,9 +883,12 @@ private:
     std::string update_status;
     {
       std::lock_guard<std::mutex> lock(lock_);
+      measured_depth_by_ref_.clear();
       for (const auto & it : valid_depth_by_ref) {
-        latest_depth_by_ref_[it.first] = it.second;
+        measured_depth_by_ref_[it.first] = it.second;
+        predicted_depth_by_ref_[it.first] = it.second;
       }
+      ++depth_measurement_epoch_;
 
       if (use_depth_from_matches_ && !valid_depth_samples.empty()) {
         const double z_med = medianOf(valid_depth_samples);
@@ -820,7 +972,10 @@ private:
 
   bool has_reference_ = false;
   std::vector<double> reference_keypoints_raw_;
-  std::unordered_map<int64_t, float> latest_depth_by_ref_;
+  std::unordered_map<int64_t, float> measured_depth_by_ref_;
+  std::unordered_map<int64_t, float> predicted_depth_by_ref_;
+  uint64_t depth_measurement_epoch_ = 0;
+  uint64_t depth_measurement_consumed_epoch_ = 0;
 
   uint32_t update_step_count_;
   uint32_t update_success_count_;
