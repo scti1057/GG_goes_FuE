@@ -1,3 +1,4 @@
+import json
 from typing import Optional
 
 import numpy as np
@@ -11,7 +12,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
     qos_profile_sensor_data,
 )
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
 from ibvs_msgs.msg import Keypoints, Matches
 
@@ -31,6 +32,8 @@ class IbvsTwistControllerNode(Node):
         self.declare_parameter('init_done_topic', '/ibvs/init_done')
         self.declare_parameter('twist_topic', '/cartesian_twist_passthrough_controller/cmd_vel')
         self.declare_parameter('goal_reached_topic', '/ibvs/control/goal_reached')
+        self.declare_parameter('publish_wx_debug', True)
+        self.declare_parameter('wx_debug_topic', '/ibvs/control/wx_debug')
 
         # Camera intrinsics for pixel -> normalized conversion.
         self.declare_parameter('fx', 615.0)
@@ -39,8 +42,8 @@ class IbvsTwistControllerNode(Node):
         self.declare_parameter('cy', 240.0)
 
         # IBVS core parameters.
-        self.declare_parameter('lambda_gain', 0.36)
-        self.declare_parameter('dls_damping', 0.1)
+        self.declare_parameter('lambda_gain', 0.22)
+        self.declare_parameter('dls_damping', 0.25)
         self.declare_parameter('z_est', 0.25)
         self.declare_parameter('use_per_keypoint_depth', True)
         self.declare_parameter('min_valid_depth_m', 0.05)
@@ -54,25 +57,25 @@ class IbvsTwistControllerNode(Node):
         self.declare_parameter('require_init_done', True)
         self.declare_parameter('min_matches', 5)
         self.declare_parameter('match_timeout_sec', 0.25)
-        self.declare_parameter('error_stop_px', 10.0)
-        self.declare_parameter('stop_hold_sec', 0.8)
+        self.declare_parameter('error_stop_px', 12.0)
+        self.declare_parameter('stop_hold_sec', 1.2)
         self.declare_parameter('max_linear_speed', 0.012)
-        self.declare_parameter('max_angular_speed', 0.15)
+        self.declare_parameter('max_angular_speed', 0.08)
         self.declare_parameter('log_period_sec', 1.0)
 
         # Allowed DOFs: default x,y,z + yaw.
         self.declare_parameter('allow_vx', True)
         self.declare_parameter('allow_vy', True)
         self.declare_parameter('allow_vz', True)
-        self.declare_parameter('allow_wx', False)
-        self.declare_parameter('allow_wy', False)
+        self.declare_parameter('allow_wx', True)
+        self.declare_parameter('allow_wy', True)
         self.declare_parameter('allow_wz', True)
 
         # Axis sign tuning for camera-to-tcp frame convention.
         self.declare_parameter('axis_sign_vx', -1.0)
         self.declare_parameter('axis_sign_vy', 1.0)
         self.declare_parameter('axis_sign_vz', -1.0)
-        self.declare_parameter('axis_sign_wx', 1.0)
+        self.declare_parameter('axis_sign_wx', -1.0)
         self.declare_parameter('axis_sign_wy', 1.0)
         self.declare_parameter('axis_sign_wz', -1.0)
 
@@ -143,6 +146,13 @@ class IbvsTwistControllerNode(Node):
             self.get_parameter('goal_reached_topic').value,
             init_qos,
         )
+        self.wx_debug_pub = None
+        if bool(self.get_parameter('publish_wx_debug').value):
+            self.wx_debug_pub = self.create_publisher(
+                String,
+                self.get_parameter('wx_debug_topic').value,
+                10,
+            )
 
         rate_hz = float(self.get_parameter('publish_rate_hz').value)
         period = 1.0 / max(rate_hz, 1e-3)
@@ -163,6 +173,8 @@ class IbvsTwistControllerNode(Node):
         )
         self.get_logger().info(f"Sub ref={self.get_parameter('reference_topic').value}")
         self.get_logger().info(f"Pub twist={self.get_parameter('twist_topic').value}")
+        if self.wx_debug_pub is not None:
+            self.get_logger().info(f"Pub wx debug={self.get_parameter('wx_debug_topic').value}")
 
     def now_sec(self) -> float:
         return float(self.get_clock().now().nanoseconds) * 1e-9
@@ -324,12 +336,61 @@ class IbvsTwistControllerNode(Node):
             out[valid] = d[valid]
         return out, int(np.count_nonzero(valid))
 
+    def _compute_wx_diagnostics(
+        self,
+        cur_xy: np.ndarray,
+        err_vec: np.ndarray,
+        L: np.ndarray,
+        damp: float,
+        gain: float,
+    ) -> dict:
+        n = int(cur_xy.shape[0])
+        cy_px = float(self.get_parameter('cy').value)
+        out = {
+            'wx_num': None,
+            'wx_den': None,
+            'wx_scalar_pre': None,
+            'wx_num_top': None,
+            'wx_num_bottom': None,
+            'wx_abs_top': None,
+            'wx_abs_bottom': None,
+            'n_top': 0,
+            'n_bottom': 0,
+            'y_split_px': cy_px,
+        }
+        if n <= 0 or L.shape[0] != (2 * n) or L.shape[1] < 4 or err_vec.size != (2 * n):
+            return out
+
+        wx_col = L[:, 3]
+        num = float(np.dot(wx_col, err_vec))
+        den = float(np.dot(wx_col, wx_col) + damp * damp)
+        out['wx_num'] = num
+        out['wx_den'] = den
+        if den > 1e-12 and np.isfinite(den):
+            out['wx_scalar_pre'] = float(-gain * (num / den))
+
+        contrib = (wx_col.reshape(-1, 2) * err_vec.reshape(-1, 2)).sum(axis=1)
+        top_mask = cur_xy[:, 1] <= cy_px
+        bottom_mask = ~top_mask
+        out['n_top'] = int(np.count_nonzero(top_mask))
+        out['n_bottom'] = int(np.count_nonzero(bottom_mask))
+
+        if out['n_top'] > 0:
+            c_top = contrib[top_mask]
+            out['wx_num_top'] = float(np.sum(c_top))
+            out['wx_abs_top'] = float(np.sum(np.abs(c_top)))
+        if out['n_bottom'] > 0:
+            c_bottom = contrib[bottom_mask]
+            out['wx_num_bottom'] = float(np.sum(c_bottom))
+            out['wx_abs_bottom'] = float(np.sum(np.abs(c_bottom)))
+        return out
+
     def _compute_ibvs_twist(
         self,
         cur_xy: np.ndarray,
         des_xy: np.ndarray,
         depth_m: Optional[np.ndarray],
-    ) -> tuple[np.ndarray, int, int, float, float]:
+    ) -> tuple[np.ndarray, int, int, float, float, dict]:
         cur_n = self._pixels_to_normalized(cur_xy)
         des_n = self._pixels_to_normalized(des_xy)
         err_vec = (cur_n - des_n).reshape(-1)
@@ -337,21 +398,24 @@ class IbvsTwistControllerNode(Node):
         fallback_z, depth_for_fallback = self._update_depth_fallback(depth_m)
         z_vec, depth_valid = self._build_depth_vector(depth_m, cur_n.shape[0], fallback_z)
         L = self._build_interaction_matrix(cur_n, z_vec)
+        damp = float(self.get_parameter('dls_damping').value)
+        gain = float(self.get_parameter('lambda_gain').value)
+        wx_dbg = self._compute_wx_diagnostics(cur_xy, err_vec, L, damp, gain)
 
         active = self._active_mask()
         active_idx = np.where(active)[0]
         if active_idx.size == 0:
+            wx_dbg['wx_cmd_pre'] = 0.0
             return (
                 np.zeros((6,), dtype=np.float64),
                 depth_valid,
                 depth_for_fallback,
                 float(np.median(z_vec)),
                 fallback_z,
+                wx_dbg,
             )
 
         L_a = L[:, active_idx]
-        damp = float(self.get_parameter('dls_damping').value)
-        gain = float(self.get_parameter('lambda_gain').value)
 
         I = np.eye(active_idx.size, dtype=np.float64)
         lhs = L_a.T @ L_a + (damp * damp) * I
@@ -364,7 +428,51 @@ class IbvsTwistControllerNode(Node):
 
         v6 = np.zeros((6,), dtype=np.float64)
         v6[active_idx] = -gain * v_a
-        return v6, depth_valid, depth_for_fallback, float(np.median(z_vec)), fallback_z
+        wx_dbg['wx_cmd_pre'] = float(v6[3])
+        return v6, depth_valid, depth_for_fallback, float(np.median(z_vec)), fallback_z, wx_dbg
+
+    def _publish_wx_debug(
+        self,
+        now: float,
+        source: str,
+        points: int,
+        rms_px: float,
+        wx_dbg: dict,
+        depth_valid: int,
+        depth_for_fallback: int,
+        depth_median: float,
+        depth_fallback: float,
+        v6_post: np.ndarray,
+    ):
+        if self.wx_debug_pub is None:
+            return
+        payload = {
+            't': now,
+            'source': source,
+            'points': int(points),
+            'rms_px': float(rms_px),
+            'allow_wx': bool(self.get_parameter('allow_wx').value),
+            'axis_sign_wx': float(self.get_parameter('axis_sign_wx').value),
+            'wx_cmd_pre': wx_dbg.get('wx_cmd_pre', None),
+            'wx_cmd_post': float(v6_post[3]),
+            'wx_num': wx_dbg.get('wx_num', None),
+            'wx_den': wx_dbg.get('wx_den', None),
+            'wx_scalar_pre': wx_dbg.get('wx_scalar_pre', None),
+            'wx_num_top': wx_dbg.get('wx_num_top', None),
+            'wx_num_bottom': wx_dbg.get('wx_num_bottom', None),
+            'wx_abs_top': wx_dbg.get('wx_abs_top', None),
+            'wx_abs_bottom': wx_dbg.get('wx_abs_bottom', None),
+            'n_top': int(wx_dbg.get('n_top', 0)),
+            'n_bottom': int(wx_dbg.get('n_bottom', 0)),
+            'y_split_px': wx_dbg.get('y_split_px', None),
+            'depth_valid': int(depth_valid),
+            'depth_samples': int(depth_for_fallback),
+            'depth_median_m': float(depth_median) if np.isfinite(depth_median) else None,
+            'depth_fallback_m': float(depth_fallback) if np.isfinite(depth_fallback) else None,
+        }
+        msg = String()
+        msg.data = json.dumps(payload, separators=(',', ':'))
+        self.wx_debug_pub.publish(msg)
 
     def _apply_limits(self, v6: np.ndarray) -> np.ndarray:
         out = v6.copy()
@@ -535,10 +643,12 @@ class IbvsTwistControllerNode(Node):
             self.publish_goal(False)
 
         try:
-            v6, depth_valid, depth_for_fallback, depth_median, depth_fallback = self._compute_ibvs_twist(
+            v6, depth_valid, depth_for_fallback, depth_median, depth_fallback, wx_dbg = self._compute_ibvs_twist(
                 cur_xy, des_xy, depth_m
             )
+            v6_pre = v6.copy()
             v6 = self._apply_limits(v6)
+            wx_dbg['wx_cmd_pre'] = float(v6_pre[3])
             if not np.all(np.isfinite(v6)):
                 raise ValueError('non-finite twist computed')
         except Exception as exc:
@@ -546,6 +656,18 @@ class IbvsTwistControllerNode(Node):
             self.maybe_log_status(f'IBVS solve failed ({exc}), command set to zero.')
             return
 
+        self._publish_wx_debug(
+            now,
+            source,
+            cur_xy.shape[0],
+            rms_px,
+            wx_dbg,
+            depth_valid,
+            depth_for_fallback,
+            depth_median,
+            depth_fallback,
+            v6,
+        )
         self.twist_pub.publish(self._to_twist(v6))
         depth_median_txt = f'{depth_median:.3f}' if np.isfinite(depth_median) else 'n/a'
         depth_fallback_txt = f'{depth_fallback:.3f}' if np.isfinite(depth_fallback) else 'n/a'
