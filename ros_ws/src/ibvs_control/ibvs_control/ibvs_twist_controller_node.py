@@ -1,4 +1,5 @@
 import json
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -57,10 +58,16 @@ class IbvsTwistControllerNode(Node):
         self.declare_parameter('require_init_done', True)
         self.declare_parameter('min_matches', 5)
         self.declare_parameter('match_timeout_sec', 0.25)
-        self.declare_parameter('error_stop_px', 12.0)
+        self.declare_parameter('error_stop_px', 6.0)
         self.declare_parameter('stop_hold_sec', 1.2)
         self.declare_parameter('max_linear_speed', 0.012)
         self.declare_parameter('max_angular_speed', 0.08)
+        self.declare_parameter('smooth_cmd_enable', True)
+        self.declare_parameter('smooth_cmd_use_median', True)
+        self.declare_parameter('smooth_cmd_median_window', 3)  # odd: 1,3,5...
+        self.declare_parameter('smooth_cmd_ema_alpha', 0.35)   # 0..1, higher=faster
+        self.declare_parameter('smooth_cmd_max_linear_accel', 0.08)   # m/s^2
+        self.declare_parameter('smooth_cmd_max_angular_accel', 0.70)  # rad/s^2
         self.declare_parameter('log_period_sec', 1.0)
 
         # Allowed DOFs: default x,y,z + yaw.
@@ -97,6 +104,10 @@ class IbvsTwistControllerNode(Node):
         self.last_log_sec: float = 0.0
         self._last_change_log_text: dict[str, str] = {}
         self.depth_fallback_m: float = float(self.get_parameter('z_est').value)
+        self.last_cmd_v6 = np.zeros((6,), dtype=np.float64)
+        self.last_cmd_time_sec: float = -1.0
+        self._median_window_cached: int = 3
+        self._cmd_median_buf = [deque(maxlen=self._median_window_cached) for _ in range(6)]
 
         ref_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -175,6 +186,13 @@ class IbvsTwistControllerNode(Node):
         self.get_logger().info(f"Pub twist={self.get_parameter('twist_topic').value}")
         if self.wx_debug_pub is not None:
             self.get_logger().info(f"Pub wx debug={self.get_parameter('wx_debug_topic').value}")
+        self.get_logger().info(
+            "Cmd smoothing: "
+            f"enable={bool(self.get_parameter('smooth_cmd_enable').value)} "
+            f"median={bool(self.get_parameter('smooth_cmd_use_median').value)} "
+            f"w={int(self.get_parameter('smooth_cmd_median_window').value)} "
+            f"alpha={float(self.get_parameter('smooth_cmd_ema_alpha').value):.2f}"
+        )
 
     def now_sec(self) -> float:
         return float(self.get_clock().now().nanoseconds) * 1e-9
@@ -474,10 +492,13 @@ class IbvsTwistControllerNode(Node):
         msg.data = json.dumps(payload, separators=(',', ':'))
         self.wx_debug_pub.publish(msg)
 
-    def _apply_limits(self, v6: np.ndarray) -> np.ndarray:
+    def _apply_axis_signs(self, v6: np.ndarray) -> np.ndarray:
         out = v6.copy()
         out *= self._axis_signs()
+        return out
 
+    def _apply_limits(self, v6: np.ndarray) -> np.ndarray:
+        out = v6.copy()
         max_lin = abs(float(self.get_parameter('max_linear_speed').value))
         max_ang = abs(float(self.get_parameter('max_angular_speed').value))
         out[0:3] = np.clip(out[0:3], -max_lin, max_lin)
@@ -485,6 +506,59 @@ class IbvsTwistControllerNode(Node):
 
         active = self._active_mask()
         out[~active] = 0.0
+        return out
+
+    @staticmethod
+    def _as_odd_window(n: int) -> int:
+        w = max(1, int(n))
+        if (w % 2) == 0:
+            w += 1
+        return w
+
+    def _apply_cmd_smoothing(self, v6: np.ndarray, now: float) -> np.ndarray:
+        out = np.asarray(v6, dtype=np.float64).copy()
+        if not bool(self.get_parameter('smooth_cmd_enable').value):
+            self.last_cmd_v6 = out.copy()
+            self.last_cmd_time_sec = now
+            return out
+
+        use_median = bool(self.get_parameter('smooth_cmd_use_median').value)
+        win = self._as_odd_window(int(self.get_parameter('smooth_cmd_median_window').value))
+        if win != self._median_window_cached:
+            self._median_window_cached = win
+            self._cmd_median_buf = [deque(maxlen=win) for _ in range(6)]
+
+        if use_median and win > 1:
+            med = out.copy()
+            for i in range(6):
+                self._cmd_median_buf[i].append(float(out[i]))
+                med[i] = float(np.median(np.asarray(self._cmd_median_buf[i], dtype=np.float64)))
+            out = med
+
+        alpha = float(self.get_parameter('smooth_cmd_ema_alpha').value)
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        if self.last_cmd_time_sec <= 0.0:
+            ema = out
+        else:
+            ema = alpha * out + (1.0 - alpha) * self.last_cmd_v6
+
+        # Slew-rate limiter to suppress single-frame command peaks.
+        if self.last_cmd_time_sec > 0.0:
+            dt = max(1e-3, now - self.last_cmd_time_sec)
+            max_lin_acc = abs(float(self.get_parameter('smooth_cmd_max_linear_accel').value))
+            max_ang_acc = abs(float(self.get_parameter('smooth_cmd_max_angular_accel').value))
+            max_lin_step = max_lin_acc * dt
+            max_ang_step = max_ang_acc * dt
+
+            delta = ema - self.last_cmd_v6
+            delta[0:3] = np.clip(delta[0:3], -max_lin_step, max_lin_step)
+            delta[3:6] = np.clip(delta[3:6], -max_ang_step, max_ang_step)
+            out = self.last_cmd_v6 + delta
+        else:
+            out = ema
+
+        self.last_cmd_v6 = out.copy()
+        self.last_cmd_time_sec = now
         return out
 
     @staticmethod
@@ -500,6 +574,9 @@ class IbvsTwistControllerNode(Node):
 
     def publish_zero_twist(self):
         self.twist_pub.publish(Twist())
+        self.last_cmd_v6 = np.zeros((6,), dtype=np.float64)
+        self.last_cmd_time_sec = -1.0
+        self._cmd_median_buf = [deque(maxlen=self._median_window_cached) for _ in range(6)]
 
     def publish_goal(self, reached: bool, force: bool = False):
         if (not force) and (reached == self.goal_reached):
@@ -647,6 +724,9 @@ class IbvsTwistControllerNode(Node):
                 cur_xy, des_xy, depth_m
             )
             v6_pre = v6.copy()
+            v6 = self._apply_axis_signs(v6)
+            v6 = self._apply_limits(v6)
+            v6 = self._apply_cmd_smoothing(v6, now)
             v6 = self._apply_limits(v6)
             wx_dbg['wx_cmd_pre'] = float(v6_pre[3])
             if not np.all(np.isfinite(v6)):

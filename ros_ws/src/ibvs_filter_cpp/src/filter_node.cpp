@@ -604,7 +604,7 @@ private:
     const Eigen::Matrix<double, 6, 1> & v_ee)
   {
     Eigen::Matrix<double, 6, 1> out;
-    out << -v_ee(0), v_ee(1), v_ee(2), v_ee(3), v_ee(4), -v_ee(5);
+    out << -v_ee(0), v_ee(1), -v_ee(2), -v_ee(3), v_ee(4), -v_ee(5);
     return out;
   }
 

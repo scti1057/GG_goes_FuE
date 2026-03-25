@@ -108,6 +108,7 @@ class IbvsSessionManager:
         self.args = args
         self.log_dir = Path(args.log_dir)
         self.processes = self._build_processes()
+        self.smoothing_profiles = self._build_smoothing_profiles()
 
     def _build_processes(self) -> dict:
         keypoint_cmd = [
@@ -249,6 +250,146 @@ class IbvsSessionManager:
         rebuilt = self._build_processes()
         self.processes["descriptor_matcher"].cmd = rebuilt["descriptor_matcher"].cmd
         self.processes["matches_viz"].cmd = rebuilt["matches_viz"].cmd
+
+    @staticmethod
+    def _build_smoothing_profiles() -> dict[str, dict]:
+        return {
+            "a": {
+                "name": "Sehr sanft",
+                "desc": "Maximal ruhig, deutlich träger.",
+                "params": {
+                    "smooth_cmd_enable": True,
+                    "smooth_cmd_use_median": True,
+                    "smooth_cmd_median_window": 5,
+                    "smooth_cmd_ema_alpha": 0.20,
+                    "smooth_cmd_max_linear_accel": 0.04,
+                    "smooth_cmd_max_angular_accel": 0.30,
+                },
+            },
+            "b": {
+                "name": "Sanft",
+                "desc": "Ruhig mit moderater Trägheit.",
+                "params": {
+                    "smooth_cmd_enable": True,
+                    "smooth_cmd_use_median": True,
+                    "smooth_cmd_median_window": 5,
+                    "smooth_cmd_ema_alpha": 0.28,
+                    "smooth_cmd_max_linear_accel": 0.06,
+                    "smooth_cmd_max_angular_accel": 0.45,
+                },
+            },
+            "c": {
+                "name": "Balanced",
+                "desc": "Guter Mittelweg aus Ruhe und Reaktion.",
+                "params": {
+                    "smooth_cmd_enable": True,
+                    "smooth_cmd_use_median": True,
+                    "smooth_cmd_median_window": 3,
+                    "smooth_cmd_ema_alpha": 0.35,
+                    "smooth_cmd_max_linear_accel": 0.08,
+                    "smooth_cmd_max_angular_accel": 0.70,
+                },
+            },
+            "d": {
+                "name": "Reaktiv",
+                "desc": "Spürbar direkter, noch stabilisiert.",
+                "params": {
+                    "smooth_cmd_enable": True,
+                    "smooth_cmd_use_median": True,
+                    "smooth_cmd_median_window": 3,
+                    "smooth_cmd_ema_alpha": 0.45,
+                    "smooth_cmd_max_linear_accel": 0.12,
+                    "smooth_cmd_max_angular_accel": 1.00,
+                },
+            },
+            "e": {
+                "name": "Sehr reaktiv",
+                "desc": "Sehr direkt, minimale Glättung.",
+                "params": {
+                    "smooth_cmd_enable": True,
+                    "smooth_cmd_use_median": False,
+                    "smooth_cmd_median_window": 1,
+                    "smooth_cmd_ema_alpha": 0.60,
+                    "smooth_cmd_max_linear_accel": 0.18,
+                    "smooth_cmd_max_angular_accel": 1.50,
+                },
+            },
+        }
+
+    def _format_param_value(self, value) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, float):
+            return f"{value:.6g}"
+        return str(value)
+
+    def _set_controller_param(self, param_name: str, value) -> bool:
+        value_str = self._format_param_value(value)
+        cmd_set = [
+            "ros2",
+            "param",
+            "set",
+            self.args.controller_node_name,
+            param_name,
+            value_str,
+        ]
+        rc_set, out_set = run_cmd(cmd_set, timeout_sec=float(self.args.controller_param_timeout))
+        if rc_set != 0:
+            short = out_set.splitlines()[-1] if out_set else "(kein output)"
+            print(f"    - FEHLER {param_name}: {short}")
+            return False
+        return True
+
+    def print_controller_smoothing_profiles(self) -> None:
+        print("\n[controller] Glättungsprofile (A-E):")
+        for key in ("a", "b", "c", "d", "e"):
+            p = self.smoothing_profiles[key]
+            params = p["params"]
+            print(f"  {key.upper()}) {p['name']} - {p['desc']}")
+            print(
+                "     "
+                f"enable={params['smooth_cmd_enable']}, "
+                f"median={params['smooth_cmd_use_median']}, "
+                f"window={params['smooth_cmd_median_window']}, "
+                f"alpha={params['smooth_cmd_ema_alpha']}, "
+                f"lin_acc={params['smooth_cmd_max_linear_accel']}, "
+                f"ang_acc={params['smooth_cmd_max_angular_accel']}"
+            )
+
+    def apply_controller_smoothing_profile(self, key: str) -> bool:
+        key = key.lower().strip()
+        if key not in self.smoothing_profiles:
+            print("  - Ungültiges Profil. Erlaubt: A-E")
+            return False
+
+        profile = self.smoothing_profiles[key]
+        print(f"\n[controller] Setze Profil {key.upper()} ({profile['name']}) ...")
+        all_ok = True
+        for name, value in profile["params"].items():
+            ok = self._set_controller_param(name, value)
+            print(f"    - {name}={self._format_param_value(value)}: {'ok' if ok else 'FEHLER'}")
+            all_ok = all_ok and ok
+
+        if all_ok:
+            print("  - Profil erfolgreich gesetzt.")
+        else:
+            print("  - Profil teilweise gesetzt (bitte Node/Param-Namen prüfen).")
+        return all_ok
+
+    def controller_smoothing_menu(self) -> None:
+        while True:
+            print("\n--- Controller Glättung ---")
+            print(f"  Node: {self.args.controller_node_name}")
+            self.print_controller_smoothing_profiles()
+            print("  Eingabe: A/B/C/D/E")
+            print("  b) Zurück")
+            choice = input("\nAuswahl: ").strip().lower()
+            if choice in ("a", "b", "c", "d", "e"):
+                self.apply_controller_smoothing_profile(choice)
+            elif choice == "b":
+                return
+            else:
+                print("  - Unbekannte Eingabe.")
 
     def start_filter(self) -> None:
         self._refresh_filter_cmd()
@@ -897,6 +1038,7 @@ class IbvsSessionManager:
         print("  7) Filter Menü (ibvs_filter_cpp)")
         print("  8) local_rescue_mode setzen (descriptor_matcher)")
         print("  9) prefilter setzen (descriptor_matcher)")
+        print("  10) Controller Glättungsprofil setzen (A-E)")
         print("  q) Beenden (stoppt ebenfalls alle Nodes)")
 
     def run(self) -> int:
@@ -932,6 +1074,8 @@ class IbvsSessionManager:
                     self.local_rescue_mode_menu()
                 elif choice == "9":
                     self.prefilter_menu()
+                elif choice == "10":
+                    self.controller_smoothing_menu()
                 elif choice == "q":
                     print("\nBeende Manager und stoppe alle Nodes ...")
                     self.stop_all()
@@ -975,6 +1119,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefilter-top-k", type=int, default=100)
     parser.add_argument("--descriptor-matcher-node", default="/descriptor_matcher_node")
     parser.add_argument("--descriptor-param-timeout", type=float, default=6.0)
+    parser.add_argument("--controller-node-name", default="/ibvs_twist_controller_node")
+    parser.add_argument("--controller-param-timeout", type=float, default=6.0)
 
     parser.add_argument("--filter-package", default="ibvs_filter_cpp")
     parser.add_argument("--filter-executable", default="filter_node")
