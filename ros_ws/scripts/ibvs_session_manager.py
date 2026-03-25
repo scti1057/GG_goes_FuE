@@ -254,55 +254,55 @@ class IbvsSessionManager:
     @staticmethod
     def _build_smoothing_profiles() -> dict[str, dict]:
         return {
-            "a": {
-                "name": "Sehr sanft",
-                "desc": "Maximal ruhig, deutlich träger.",
+            "1": {
+                "name": "Ultra sanft",
+                "desc": "Maximal ruhig, sehr träge (stärkste Glättung).",
                 "params": {
                     "smooth_cmd_enable": True,
                     "smooth_cmd_use_median": True,
-                    "smooth_cmd_median_window": 5,
-                    "smooth_cmd_ema_alpha": 0.20,
-                    "smooth_cmd_max_linear_accel": 0.04,
-                    "smooth_cmd_max_angular_accel": 0.30,
+                    "smooth_cmd_median_window": 7,
+                    "smooth_cmd_ema_alpha": 0.12,
+                    "smooth_cmd_max_linear_accel": 0.02,
+                    "smooth_cmd_max_angular_accel": 0.15,
                 },
             },
-            "b": {
-                "name": "Sanft",
+            "2": {
+                "name": "Sehr sanft",
                 "desc": "Ruhig mit moderater Trägheit.",
                 "params": {
                     "smooth_cmd_enable": True,
                     "smooth_cmd_use_median": True,
-                    "smooth_cmd_median_window": 5,
-                    "smooth_cmd_ema_alpha": 0.28,
-                    "smooth_cmd_max_linear_accel": 0.06,
-                    "smooth_cmd_max_angular_accel": 0.45,
+                    "smooth_cmd_median_window": 7,
+                    "smooth_cmd_ema_alpha": 0.18,
+                    "smooth_cmd_max_linear_accel": 0.03,
+                    "smooth_cmd_max_angular_accel": 0.25,
                 },
             },
-            "c": {
-                "name": "Balanced",
+            "3": {
+                "name": "Sanft",
                 "desc": "Guter Mittelweg aus Ruhe und Reaktion.",
                 "params": {
                     "smooth_cmd_enable": True,
                     "smooth_cmd_use_median": True,
-                    "smooth_cmd_median_window": 3,
-                    "smooth_cmd_ema_alpha": 0.35,
-                    "smooth_cmd_max_linear_accel": 0.08,
-                    "smooth_cmd_max_angular_accel": 0.70,
+                    "smooth_cmd_median_window": 5,
+                    "smooth_cmd_ema_alpha": 0.26,
+                    "smooth_cmd_max_linear_accel": 0.05,
+                    "smooth_cmd_max_angular_accel": 0.40,
                 },
             },
-            "d": {
-                "name": "Reaktiv",
+            "4": {
+                "name": "Balanced",
                 "desc": "Spürbar direkter, noch stabilisiert.",
                 "params": {
                     "smooth_cmd_enable": True,
                     "smooth_cmd_use_median": True,
                     "smooth_cmd_median_window": 3,
-                    "smooth_cmd_ema_alpha": 0.45,
-                    "smooth_cmd_max_linear_accel": 0.12,
-                    "smooth_cmd_max_angular_accel": 1.00,
+                    "smooth_cmd_ema_alpha": 0.38,
+                    "smooth_cmd_max_linear_accel": 0.09,
+                    "smooth_cmd_max_angular_accel": 0.75,
                 },
             },
-            "e": {
+            "5": {
                 "name": "Sehr reaktiv",
                 "desc": "Sehr direkt, minimale Glättung.",
                 "params": {
@@ -341,11 +341,11 @@ class IbvsSessionManager:
         return True
 
     def print_controller_smoothing_profiles(self) -> None:
-        print("\n[controller] Glättungsprofile (A-E):")
-        for key in ("a", "b", "c", "d", "e"):
+        print("\n[controller] Glättungsprofile (1-5):")
+        for key in ("1", "2", "3", "4", "5"):
             p = self.smoothing_profiles[key]
             params = p["params"]
-            print(f"  {key.upper()}) {p['name']} - {p['desc']}")
+            print(f"  {key}) {p['name']} - {p['desc']}")
             print(
                 "     "
                 f"enable={params['smooth_cmd_enable']}, "
@@ -359,7 +359,7 @@ class IbvsSessionManager:
     def apply_controller_smoothing_profile(self, key: str) -> bool:
         key = key.lower().strip()
         if key not in self.smoothing_profiles:
-            print("  - Ungültiges Profil. Erlaubt: A-E")
+            print("  - Ungültiges Profil. Erlaubt: 1-5")
             return False
 
         profile = self.smoothing_profiles[key]
@@ -381,10 +381,10 @@ class IbvsSessionManager:
             print("\n--- Controller Glättung ---")
             print(f"  Node: {self.args.controller_node_name}")
             self.print_controller_smoothing_profiles()
-            print("  Eingabe: A/B/C/D/E")
+            print("  Eingabe: 1/2/3/4/5")
             print("  b) Zurück")
             choice = input("\nAuswahl: ").strip().lower()
-            if choice in ("a", "b", "c", "d", "e"):
+            if choice in ("1", "2", "3", "4", "5"):
                 self.apply_controller_smoothing_profile(choice)
             elif choice == "b":
                 return
@@ -1038,7 +1038,7 @@ class IbvsSessionManager:
         print("  7) Filter Menü (ibvs_filter_cpp)")
         print("  8) local_rescue_mode setzen (descriptor_matcher)")
         print("  9) prefilter setzen (descriptor_matcher)")
-        print("  10) Controller Glättungsprofil setzen (A-E)")
+        print("  10) Controller Glättungsprofil setzen (1-5)")
         print("  q) Beenden (stoppt ebenfalls alle Nodes)")
 
     def run(self) -> int:
