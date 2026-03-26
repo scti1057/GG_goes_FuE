@@ -227,6 +227,8 @@ class IbvsSessionManager:
             "-p",
             f"predict_rate:={self.args.filter_predict_rate}",
             "-p",
+            f"camera_velocity_topic:={self.args.filter_camera_velocity_topic}",
+            "-p",
             f"max_active_keypoints:={self.args.filter_max_active_keypoints}",
             "-p",
             f"min_init_keypoints:={self.args.filter_min_init_keypoints}",
@@ -442,6 +444,8 @@ class IbvsSessionManager:
             "gate_threshold",
             "z_depth",
             "predict_rate",
+            "camera_velocity_topic",
+            "debug_predict_only",
             "max_active_keypoints",
             "min_init_keypoints",
             "min_update_keypoints",
@@ -458,6 +462,28 @@ class IbvsSessionManager:
             else:
                 print(f"  - {p}: (nicht lesbar)")
 
+    def _set_filter_predict_only(self, enabled: bool) -> bool:
+        return self._set_filter_param(
+            "debug_predict_only",
+            "true" if enabled else "false",
+        )
+
+    def _filter_debug_reset_and_freeze(self) -> None:
+        if not self._is_filter_running():
+            print("  - Filter läuft nicht. Bitte zuerst starten.")
+            return
+        print("  Debug-Reset+Freeze: updates kurz an, relocalize, dann freeze.")
+        ok = True
+        ok &= self._set_filter_predict_only(False)
+        ok &= self._set_filter_param("force_relocalization", "false")
+        ok &= self._set_filter_param("force_relocalization", "true")
+        time.sleep(0.6)
+        ok &= self._set_filter_predict_only(True)
+        if ok:
+            print("  - OK: Predict-only aktiv. Matches/Depth-Updates werden ignoriert.")
+        else:
+            print("  - FEHLER: Mindestens ein Parameter-Set fehlgeschlagen.")
+
     def filter_menu(self) -> None:
         while True:
             print("\n--- Filter Menü ---")
@@ -467,6 +493,9 @@ class IbvsSessionManager:
             print("  4) Filter-Parameter setzen (runtime)")
             print("  5) Manuelle Relokalisierung triggern")
             print("  6) Startup-Filtertyp setzen (nächster Start)")
+            print("  7) Debug Predict-only AN (keine Updates aus Matches)")
+            print("  8) Debug Predict-only AUS")
+            print("  9) Debug Reset+Freeze (reseed + predict-only AN)")
             print("  b) Zurück")
 
             choice = input("\nFilter-Auswahl: ").strip().lower()
@@ -482,7 +511,7 @@ class IbvsSessionManager:
                     "  Bekannte Runtime-Parameter: "
                     "q_noise, r_noise, gate_threshold, z_depth, predict_rate, "
                     "max_active_keypoints, min_init_keypoints, min_update_keypoints, "
-                    "force_relocalization"
+                    "force_relocalization, debug_predict_only"
                 )
                 param_name = input("  Param-Name: ").strip()
                 value = input("  Wert: ").strip()
@@ -508,6 +537,12 @@ class IbvsSessionManager:
                     if restart == "y":
                         self.stop_filter()
                         self.start_filter()
+            elif choice == "7":
+                self._set_filter_predict_only(True)
+            elif choice == "8":
+                self._set_filter_predict_only(False)
+            elif choice == "9":
+                self._filter_debug_reset_and_freeze()
             elif choice == "b":
                 return
             else:
@@ -1132,6 +1167,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--filter-gate-threshold", type=float, default=20.0)
     parser.add_argument("--filter-z-depth", type=float, default=0.25)
     parser.add_argument("--filter-predict-rate", type=float, default=120.0)
+    parser.add_argument(
+        "--filter-camera-velocity-topic",
+        default="/cartesian_twist_passthrough_controller/cmd_vel",
+    )
     parser.add_argument("--filter-max-active-keypoints", type=int, default=30)
     parser.add_argument("--filter-min-init-keypoints", type=int, default=8)
     parser.add_argument("--filter-min-update-keypoints", type=int, default=1)

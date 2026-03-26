@@ -1,6 +1,7 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -129,6 +130,7 @@ private:
     declare_parameter<double>("depth_ema_alpha", 0.35);
     declare_parameter<double>("gate_threshold", 20.0);
     declare_parameter<double>("predict_rate", 120.0);
+    declare_parameter<bool>("debug_predict_only", false);
 
     declare_parameter<int64_t>("max_active_keypoints", 20);
     declare_parameter<int64_t>("min_init_keypoints", 8);
@@ -168,6 +170,7 @@ private:
     depth_max_valid_m_ = get_parameter("depth_max_valid_m").as_double();
     depth_ema_alpha_ = get_parameter("depth_ema_alpha").as_double();
     predict_rate_ = get_parameter("predict_rate").as_double();
+    debug_predict_only_.store(get_parameter("debug_predict_only").as_bool());
     if (!has_runtime_depth_) {
       runtime_z_depth_ = z_depth_;
     }
@@ -401,6 +404,7 @@ private:
     double next_depth_max_valid_m = depth_max_valid_m_;
     double next_depth_ema_alpha = depth_ema_alpha_;
     double next_predict_rate = predict_rate_;
+    bool next_debug_predict_only = debug_predict_only_.load();
 
     int next_active_max = max_active_keypoints_;
     int next_min_init = min_init_keypoints_;
@@ -483,6 +487,8 @@ private:
           return result;
         }
         next_predict_rate = p.as_double();
+      } else if (p.get_name() == "debug_predict_only") {
+        next_debug_predict_only = p.as_bool();
       } else if (p.get_name() == "max_active_keypoints") {
         if (p.as_int() < 4) {
           result.successful = false;
@@ -567,6 +573,8 @@ private:
 
     const bool rate_changed = std::abs(next_predict_rate - predict_rate_) > 1e-12;
     predict_rate_ = next_predict_rate;
+    const bool debug_predict_only_changed = (next_debug_predict_only != debug_predict_only_.load());
+    debug_predict_only_.store(next_debug_predict_only);
 
     max_active_keypoints_ = next_active_max;
     min_init_keypoints_ = next_min_init;
@@ -588,6 +596,14 @@ private:
       std::lock_guard<std::mutex> tf_guard(tf_lock_);
       tf_ready_base_tcp_ = false;
       tf_ready_tcp_cam_ = false;
+    }
+
+    if (debug_predict_only_changed) {
+      RCLCPP_WARN(
+        get_logger(),
+        "debug_predict_only=%s (%s updates from /ibvs/matches)",
+        debug_predict_only_.load() ? "true" : "false",
+        debug_predict_only_.load() ? "ignoring" : "using");
     }
 
     if (filter_ != nullptr) {
@@ -1024,6 +1040,11 @@ private:
       return;
     }
 
+    if (debug_predict_only_.load()) {
+      last_update_status_ = "PREDICT_ONLY (UPDATES DISABLED)";
+      return;
+    }
+
     const int num_matches = static_cast<int>(matches_msg->ref_id.size());
     if (num_matches <= 0) {
       return;
@@ -1145,6 +1166,7 @@ private:
   double runtime_z_depth_ = 0.25;
   bool has_runtime_depth_ = false;
   double predict_rate_;
+  std::atomic<bool> debug_predict_only_{false};
 
   int max_active_keypoints_;
   int min_init_keypoints_;

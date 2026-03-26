@@ -64,9 +64,11 @@ class FilterDebugNode(Node):
 
         self.raw_ref_ids = np.zeros((0,), dtype=np.int64)
         self.raw_cur_xy = np.zeros((0, 2), dtype=np.float32)
+        self.raw_depth_m = np.zeros((0,), dtype=np.float32)
 
         self.filtered_ref_ids = np.zeros((0,), dtype=np.int64)
         self.filtered_cur_xy = np.zeros((0, 2), dtype=np.float32)
+        self.filtered_depth_m = np.zeros((0,), dtype=np.float32)
 
         self.filter_status = 'UNKNOWN'
         self.filter_uncertainty = 0.0
@@ -180,12 +182,25 @@ class FilterDebugNode(Node):
     def _parse_matches(msg: Matches):
         xy = np.asarray(msg.xy, dtype=np.float32)
         if xy.size % 2 != 0:
-            return np.zeros((0,), dtype=np.int64), np.zeros((0, 2), dtype=np.float32)
+            return (
+                np.zeros((0,), dtype=np.int64),
+                np.zeros((0, 2), dtype=np.float32),
+                np.zeros((0,), dtype=np.float32),
+            )
         cur = xy.reshape(-1, 2)
         n = min(cur.shape[0], len(msg.ref_id))
         if n <= 0:
-            return np.zeros((0,), dtype=np.int64), np.zeros((0, 2), dtype=np.float32)
-        return np.asarray(msg.ref_id[:n], dtype=np.int64), cur[:n]
+            return (
+                np.zeros((0,), dtype=np.int64),
+                np.zeros((0, 2), dtype=np.float32),
+                np.zeros((0,), dtype=np.float32),
+            )
+        depth_m = np.asarray(msg.depth_m[:n], dtype=np.float32) if len(msg.depth_m) >= n else np.full(
+            (n,),
+            np.nan,
+            dtype=np.float32,
+        )
+        return np.asarray(msg.ref_id[:n], dtype=np.int64), cur[:n], depth_m
 
     def on_reference(self, msg: Keypoints):
         xy = np.asarray(msg.xy, dtype=np.float32)
@@ -195,16 +210,18 @@ class FilterDebugNode(Node):
             self.reference_xy = xy.reshape(-1, 2)
 
     def on_raw_matches(self, msg: Matches):
-        ref_id, cur_xy = self._parse_matches(msg)
+        ref_id, cur_xy, depth_m = self._parse_matches(msg)
         with self.lock:
             self.raw_ref_ids = ref_id
             self.raw_cur_xy = cur_xy
+            self.raw_depth_m = depth_m
 
     def on_filtered_matches(self, msg: Matches):
-        ref_id, cur_xy = self._parse_matches(msg)
+        ref_id, cur_xy, depth_m = self._parse_matches(msg)
         with self.lock:
             self.filtered_ref_ids = ref_id
             self.filtered_cur_xy = cur_xy
+            self.filtered_depth_m = depth_m
 
     def on_filter_status(self, msg: String):
         with self.lock:
@@ -246,6 +263,7 @@ class FilterDebugNode(Node):
             raw_cur_xy = self.raw_cur_xy.copy()
             filtered_ref_ids = self.filtered_ref_ids.copy()
             filtered_cur_xy = self.filtered_cur_xy.copy()
+            filtered_depth_m = self.filtered_depth_m.copy()
             filter_status = self.filter_status
             filter_uncertainty = self.filter_uncertainty
             update_status = self.update_status
@@ -260,6 +278,7 @@ class FilterDebugNode(Node):
             raw_cur_xy,
             filtered_ref_ids,
             filtered_cur_xy,
+            filtered_depth_m,
             filter_status,
             filter_uncertainty,
             update_status,
@@ -280,6 +299,7 @@ class FilterDebugNode(Node):
         raw_cur_xy,
         filtered_ref_ids,
         filtered_cur_xy,
+        filtered_depth_m,
         filter_status,
         filter_uncertainty,
         update_status,
@@ -299,9 +319,20 @@ class FilterDebugNode(Node):
                 cv2.circle(cv_img, p_ref, 2, (0, 0, 255), -1)
                 cv2.circle(cv_img, p_raw, 2, (255, 0, 0), -1)
 
+        valid_depth = np.isfinite(filtered_depth_m) & (filtered_depth_m > 0.0)
+        if np.any(valid_depth):
+            depth_min = float(np.min(filtered_depth_m[valid_depth]))
+            depth_max = float(np.max(filtered_depth_m[valid_depth]))
+        else:
+            depth_min = float('nan')
+            depth_max = float('nan')
+
         for i in range(min(filtered_ref_ids.size, filtered_cur_xy.shape[0], max_draw)):
             p_f = tuple(np.round(filtered_cur_xy[i]).astype(np.int32).tolist())
-            cv2.circle(cv_img, p_f, 2, (0, 255, 255), -1)
+            color = (0, 255, 255)
+            if i < filtered_depth_m.size and np.isfinite(depth_min) and np.isfinite(depth_max):
+                color = self._depth_to_yellow_bgr(float(filtered_depth_m[i]), depth_min, depth_max)
+            cv2.circle(cv_img, p_f, 2, color, -1)
 
         filter_name = 'UNKNOWN'
         status_name = filter_status
@@ -311,7 +342,7 @@ class FilterDebugNode(Node):
             status_name = right.strip()
 
         overlay = cv_img.copy()
-        box_w, box_h = 370, 285
+        box_w, box_h = 400, 315
         cv2.rectangle(overlay, (5, 5), (5 + box_w, 5 + box_h), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.4, cv_img, 0.6, 0, cv_img)
 
@@ -369,6 +400,27 @@ class FilterDebugNode(Node):
             1,
         )
         y_txt += line_h + 4
+        if np.isfinite(depth_min) and np.isfinite(depth_max):
+            cv2.putText(
+                cv_img,
+                f'Depth range (filtered): {depth_min:.3f} .. {depth_max:.3f} m',
+                (x_txt, y_txt),
+                font,
+                0.5,
+                (255, 255, 255),
+                1,
+            )
+        else:
+            cv2.putText(
+                cv_img,
+                'Depth range (filtered): n/a',
+                (x_txt, y_txt),
+                font,
+                0.5,
+                (180, 180, 180),
+                1,
+            )
+        y_txt += line_h
         cv2.putText(cv_img, 'Legende:', (x_txt, y_txt), font, 0.5, (220, 220, 220), 1)
         y_txt += line_h
         cv2.circle(cv_img, (x_txt + 8, y_txt - 4), 4, (0, 0, 255), -1)
@@ -379,7 +431,29 @@ class FilterDebugNode(Node):
         y_txt += line_h
         cv2.circle(cv_img, (x_txt + 8, y_txt - 4), 4, (0, 255, 255), -1)
         cv2.putText(cv_img, 'Gelb: Gefilterter Punkt', (x_txt + 20, y_txt), font, 0.45, (255, 255, 255), 1)
+        y_txt += line_h
+        cv2.putText(
+            cv_img,
+            'Gelb hell=nah, dunkel=weit',
+            (x_txt + 20, y_txt),
+            font,
+            0.45,
+            (255, 255, 255),
+            1,
+        )
         self._draw_coordinate_axes(cv_img)
+
+    @staticmethod
+    def _depth_to_yellow_bgr(z: float, z_min: float, z_max: float) -> tuple[int, int, int]:
+        if not (np.isfinite(z) and np.isfinite(z_min) and np.isfinite(z_max)):
+            return (0, 255, 255)
+        span = max(1e-6, z_max - z_min)
+        t = float(np.clip((z - z_min) / span, 0.0, 1.0))
+        # Keep yellow hue and encode depth by brightness:
+        # near -> bright yellow, far -> darker yellow.
+        brightness = int(round(255.0 - 140.0 * t))
+        brightness = int(np.clip(brightness, 80, 255))
+        return (0, brightness, brightness)
 
     @staticmethod
     def _draw_coordinate_axes(cv_img):
