@@ -1,16 +1,35 @@
 services:
-  ur_driver:
-      build: .
-      image: ur_5e_driver:local
-      container_name: ros2_ur_driver
-      environment:
-        - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
-        - ROBOT_IP=192.168.1.100
-        - AXIA_FT_IP=192.168.1.120
-      volumes:
-        - ./deps/ros2_control_configs/ur_5e_axia_controller.yaml:/home/ros_ws/src/Universal_Robots_ROS2_Driver/ur_robot_driver/config/ur_controllers.yaml # Overwrite the controller config file
-      network_mode: host
-      entrypoint: ["/startup_scripts/ur5e_moveTwist_entrypoint.sh"] # Choose your needed startup script
+  # ur_driver:
+  #     build: .
+  #     image: ur_5e_driver:local
+  #     container_name: ros2_ur_driver
+  #     environment:
+  #       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+  #       - ROBOT_IP=192.168.1.100
+  #       - AXIA_FT_IP=192.168.1.120
+  #     volumes:
+  #       - ./deps/ros2_control_configs/ur_5e_axia_controller.yaml:/home/ros_ws/src/Universal_Robots_ROS2_Driver/ur_robot_driver/config/ur_controllers.yaml # Overwrite the controller config file
+  #     network_mode: host
+  #     entrypoint: ["/startup_scripts/ur5e_moveTwist_entrypoint.sh"] # Choose your needed startup script
 
-      tty: true
-      stdin_open: true
+  #     tty: true
+  #     stdin_open: true
+  
+  ur_driver:
+    image: irp-nas.fox-stairs.ts.net/hardware_drivers/ur_driver:humble
+    container_name: ros2_ur_driver
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - ROBOT_IP=192.168.1.100
+      # - AXIA_FT_IP=192.168.1.120
+      # - AXIA_USE_HARDWARE_BIASING=true
+    volumes:
+      # Mount local folder overwriting the standard description package
+      - /home/wife1013/GG_goes_FuE/driver_repos/ur_5e_driver/src/Universal_Robots_ROS2_Description:/home/ros_ws/src/Universal_Robots_ROS2_Description
+      # Overwrite the controller config file in order to add the axia force torque sensor
+      - ./deps/ros2_control_configs/ur_5e_axia_controller.yaml:/home/ros_ws/src/Universal_Robots_ROS2_Driver/ur_robot_driver/config/ur_controllers.yaml 
+    network_mode: host
+    entrypoint: ["/startup_scripts/ur5e_moveTwist_entrypoint.sh"] # Choose your needed startup script
+
+    tty: true
+    stdin_open: true
