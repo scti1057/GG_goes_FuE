@@ -40,7 +40,7 @@ public:
 
   virtual void setQRGate(double q_val, double r_val, double gate_thresh_val) = 0;
   virtual void predict(
-    const Eigen::Matrix<double, 6, 1> & v_ee,
+    const Eigen::Matrix<double, 6, 1> & v_cam,
     const Eigen::VectorXd & z_per_feature,
     double z_fallback,
     double dt) = 0;
@@ -53,8 +53,6 @@ public:
   virtual Eigen::MatrixXd getCovariance() const = 0;
 
 protected:
-  Eigen::Matrix<double, 6, 1> transformTwistEeToCam(const Eigen::Matrix<double, 6, 1> & v_ee) const;
-
   std::optional<MeasurementData> prepareMeasurement(
     const Eigen::MatrixXd & current_pixels,
     const Eigen::MatrixXd & desired_pixels,

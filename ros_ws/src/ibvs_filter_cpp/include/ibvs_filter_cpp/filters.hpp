@@ -19,7 +19,7 @@ public:
   void setQRGate(double q_val, double r_val, double gate_thresh_val) override;
   void forceRelocalization() override;
   void predict(
-    const Eigen::Matrix<double, 6, 1> & v_ee,
+    const Eigen::Matrix<double, 6, 1> & v_cam,
     const Eigen::VectorXd & z_per_feature,
     double z_fallback,
     double dt) override;
@@ -60,7 +60,7 @@ public:
   void setQRGate(double q_val, double r_val, double gate_thresh_val) override;
   void forceRelocalization() override;
   void predict(
-    const Eigen::Matrix<double, 6, 1> & v_ee,
+    const Eigen::Matrix<double, 6, 1> & v_cam,
     const Eigen::VectorXd & z_per_feature,
     double z_fallback,
     double dt) override;
@@ -111,7 +111,7 @@ public:
   void setQRGate(double q_val, double r_val, double gate_thresh_val) override;
   void forceRelocalization() override;
   void predict(
-    const Eigen::Matrix<double, 6, 1> & v_ee,
+    const Eigen::Matrix<double, 6, 1> & v_cam,
     const Eigen::VectorXd & z_per_feature,
     double z_fallback,
     double dt) override;
@@ -154,7 +154,7 @@ public:
   void setQRGate(double q_val, double r_val, double gate_thresh_val) override;
   void forceRelocalization() override;
   void predict(
-    const Eigen::Matrix<double, 6, 1> & v_ee,
+    const Eigen::Matrix<double, 6, 1> & v_cam,
     const Eigen::VectorXd & z_per_feature,
     double z_fallback,
     double dt) override;

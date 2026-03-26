@@ -5,6 +5,7 @@ from typing import Optional
 import numpy as np
 import rclpy
 from geometry_msgs.msg import Twist
+from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -14,8 +15,27 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from std_msgs.msg import Bool, String
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from ibvs_msgs.msg import Keypoints, Matches
+
+
+def quat_to_rotmat(x: float, y: float, z: float, w: float) -> np.ndarray:
+    n = x * x + y * y + z * z + w * w
+    if n <= 1e-12:
+        return np.eye(3, dtype=np.float64)
+    s = 2.0 / n
+    xx, yy, zz = x * x * s, y * y * s, z * z * s
+    xy, xz, yz = x * y * s, x * z * s, y * z * s
+    wx, wy, wz = w * x * s, w * y * s, w * z * s
+    return np.array(
+        [
+            [1.0 - (yy + zz), xy - wz, xz + wy],
+            [xy + wz, 1.0 - (xx + zz), yz - wx],
+            [xz - wy, yz + wx, 1.0 - (xx + yy)],
+        ],
+        dtype=np.float64,
+    )
 
 
 class IbvsTwistControllerNode(Node):
@@ -78,13 +98,17 @@ class IbvsTwistControllerNode(Node):
         self.declare_parameter('allow_wy', True)
         self.declare_parameter('allow_wz', True)
 
-        # Axis sign tuning for camera-to-tcp frame convention.
+        # Legacy compatibility parameters; no longer used for transform logic.
         self.declare_parameter('axis_sign_vx', -1.0)
         self.declare_parameter('axis_sign_vy', 1.0)
         self.declare_parameter('axis_sign_vz', -1.0)
         self.declare_parameter('axis_sign_wx', -1.0)
         self.declare_parameter('axis_sign_wy', 1.0)
         self.declare_parameter('axis_sign_wz', -1.0)
+        self.declare_parameter('base_frame', 'base')
+        self.declare_parameter('tcp_frame', 'tool0')
+        self.declare_parameter('camera_frame', 'camera_color_optical_frame')
+        self.declare_parameter('tf_lookup_timeout_sec', 0.2)
 
         self.ref_xy: Optional[np.ndarray] = None
 
@@ -108,6 +132,15 @@ class IbvsTwistControllerNode(Node):
         self.last_cmd_time_sec: float = -1.0
         self._median_window_cached: int = 3
         self._cmd_median_buf = [deque(maxlen=self._median_window_cached) for _ in range(6)]
+        self._tf_ready_tcp_cam = False
+        self._tf_ready_base_tcp = False
+        self._R_tcp_cam = np.eye(3, dtype=np.float64)
+        self._p_tcp_cam = np.zeros((3,), dtype=np.float64)
+        self._R_base_tcp = np.eye(3, dtype=np.float64)
+        self._last_tf_warn_sec = 0.0
+
+        self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         ref_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -168,6 +201,7 @@ class IbvsTwistControllerNode(Node):
         rate_hz = float(self.get_parameter('publish_rate_hz').value)
         period = 1.0 / max(rate_hz, 1e-3)
         self.timer = self.create_timer(period, self.on_timer)
+        self.tf_timer = self.create_timer(0.5, self._update_tf_cache)
 
         self.publish_goal(False, force=True)
 
@@ -193,9 +227,106 @@ class IbvsTwistControllerNode(Node):
             f"w={int(self.get_parameter('smooth_cmd_median_window').value)} "
             f"alpha={float(self.get_parameter('smooth_cmd_ema_alpha').value):.2f}"
         )
+        self.get_logger().info(
+            "TF command conversion: "
+            f"camera={self._camera_frame()} tcp={self._tcp_frame()} base={self._base_frame()}"
+        )
 
     def now_sec(self) -> float:
         return float(self.get_clock().now().nanoseconds) * 1e-9
+
+    def _base_frame(self) -> str:
+        return str(self.get_parameter('base_frame').value)
+
+    def _tcp_frame(self) -> str:
+        return str(self.get_parameter('tcp_frame').value)
+
+    def _camera_frame(self) -> str:
+        return str(self.get_parameter('camera_frame').value)
+
+    def _update_tf_cache(self):
+        timeout_sec = max(1e-3, float(self.get_parameter('tf_lookup_timeout_sec').value))
+
+        try:
+            tf_base_tcp = self.tf_buffer.lookup_transform(
+                self._base_frame(),
+                self._tcp_frame(),
+                rclpy.time.Time(),
+                timeout=Duration(seconds=timeout_sec),
+            )
+            q_bt = tf_base_tcp.transform.rotation
+            self._R_base_tcp = quat_to_rotmat(q_bt.x, q_bt.y, q_bt.z, q_bt.w)
+            first_ready = not self._tf_ready_base_tcp
+            self._tf_ready_base_tcp = True
+            if first_ready:
+                self.get_logger().info(
+                    f"TF ready ({self._base_frame()} <- {self._tcp_frame()})"
+                )
+        except TransformException as exc:
+            now = self.now_sec()
+            if (now - self._last_tf_warn_sec) > 1.0:
+                self._last_tf_warn_sec = now
+                self.get_logger().warn(
+                    f"TF lookup failed ({self._base_frame()} <- {self._tcp_frame()}): {exc}"
+                )
+
+        try:
+            tf_tcp_cam = self.tf_buffer.lookup_transform(
+                self._tcp_frame(),
+                self._camera_frame(),
+                rclpy.time.Time(),
+                timeout=Duration(seconds=timeout_sec),
+            )
+            t = tf_tcp_cam.transform.translation
+            q = tf_tcp_cam.transform.rotation
+            self._p_tcp_cam = np.array([t.x, t.y, t.z], dtype=np.float64)
+            self._R_tcp_cam = quat_to_rotmat(q.x, q.y, q.z, q.w)
+            first_ready = not self._tf_ready_tcp_cam
+            self._tf_ready_tcp_cam = True
+            if first_ready:
+                p = self._p_tcp_cam
+                self.get_logger().info(
+                    f"TF ready ({self._tcp_frame()} <- {self._camera_frame()}), "
+                    f"p_tcp_cam=[{p[0]:+.3f},{p[1]:+.3f},{p[2]:+.3f}]"
+                )
+        except TransformException as exc:
+            now = self.now_sec()
+            if (now - self._last_tf_warn_sec) > 1.0:
+                self._last_tf_warn_sec = now
+                self.get_logger().warn(
+                    f"TF lookup failed ({self._tcp_frame()} <- {self._camera_frame()}): {exc}"
+                )
+
+    def _cam_twist_to_tcp_twist(self, cam_v6: np.ndarray) -> Optional[np.ndarray]:
+        if not self._tf_ready_tcp_cam:
+            return None
+        R = self._R_tcp_cam.copy()
+        p = self._p_tcp_cam.copy()
+
+        v_cam = cam_v6[0:3]
+        w_cam = cam_v6[3:6]
+        w_tcp = R @ w_cam
+        v_tcp = (R @ v_cam) - np.cross(w_tcp, p)
+
+        out = np.zeros((6,), dtype=np.float64)
+        out[0:3] = v_tcp
+        out[3:6] = w_tcp
+        return out
+
+    def _tcp_twist_to_base_twist(self, tcp_v6: np.ndarray) -> Optional[np.ndarray]:
+        if not self._tf_ready_base_tcp:
+            return None
+        R = self._R_base_tcp.copy()
+        out = np.zeros((6,), dtype=np.float64)
+        out[0:3] = R @ tcp_v6[0:3]
+        out[3:6] = R @ tcp_v6[3:6]
+        return out
+
+    def _cam_twist_to_base_twist(self, cam_v6: np.ndarray) -> Optional[np.ndarray]:
+        tcp_v6 = self._cam_twist_to_tcp_twist(cam_v6)
+        if tcp_v6 is None:
+            return None
+        return self._tcp_twist_to_base_twist(tcp_v6)
 
     def on_init_done(self, msg: Bool):
         self.init_done = bool(msg.data)
@@ -262,16 +393,6 @@ class IbvsTwistControllerNode(Node):
             bool(self.get_parameter('allow_wy').value),
             bool(self.get_parameter('allow_wz').value),
         ], dtype=bool)
-
-    def _axis_signs(self) -> np.ndarray:
-        return np.array([
-            float(self.get_parameter('axis_sign_vx').value),
-            float(self.get_parameter('axis_sign_vy').value),
-            float(self.get_parameter('axis_sign_vz').value),
-            float(self.get_parameter('axis_sign_wx').value),
-            float(self.get_parameter('axis_sign_wy').value),
-            float(self.get_parameter('axis_sign_wz').value),
-        ], dtype=np.float64)
 
     def _pixels_to_normalized(self, uv: np.ndarray) -> np.ndarray:
         fx = float(self.get_parameter('fx').value)
@@ -470,7 +591,9 @@ class IbvsTwistControllerNode(Node):
             'points': int(points),
             'rms_px': float(rms_px),
             'allow_wx': bool(self.get_parameter('allow_wx').value),
-            'axis_sign_wx': float(self.get_parameter('axis_sign_wx').value),
+            'base_frame': self._base_frame(),
+            'tcp_frame': self._tcp_frame(),
+            'camera_frame': self._camera_frame(),
             'wx_cmd_pre': wx_dbg.get('wx_cmd_pre', None),
             'wx_cmd_post': float(v6_post[3]),
             'wx_num': wx_dbg.get('wx_num', None),
@@ -492,20 +615,18 @@ class IbvsTwistControllerNode(Node):
         msg.data = json.dumps(payload, separators=(',', ':'))
         self.wx_debug_pub.publish(msg)
 
-    def _apply_axis_signs(self, v6: np.ndarray) -> np.ndarray:
+    def _apply_active_mask(self, v6: np.ndarray) -> np.ndarray:
         out = v6.copy()
-        out *= self._axis_signs()
+        active = self._active_mask()
+        out[~active] = 0.0
         return out
 
-    def _apply_limits(self, v6: np.ndarray) -> np.ndarray:
+    def _apply_speed_limits(self, v6: np.ndarray) -> np.ndarray:
         out = v6.copy()
         max_lin = abs(float(self.get_parameter('max_linear_speed').value))
         max_ang = abs(float(self.get_parameter('max_angular_speed').value))
         out[0:3] = np.clip(out[0:3], -max_lin, max_lin)
         out[3:6] = np.clip(out[3:6], -max_ang, max_ang)
-
-        active = self._active_mask()
-        out[~active] = 0.0
         return out
 
     @staticmethod
@@ -724,12 +845,16 @@ class IbvsTwistControllerNode(Node):
                 cur_xy, des_xy, depth_m
             )
             v6_pre = v6.copy()
-            v6 = self._apply_axis_signs(v6)
-            v6 = self._apply_limits(v6)
+            v6 = self._apply_active_mask(v6)
+            v6 = self._apply_speed_limits(v6)
             v6 = self._apply_cmd_smoothing(v6, now)
-            v6 = self._apply_limits(v6)
+            v6 = self._apply_speed_limits(v6)
             wx_dbg['wx_cmd_pre'] = float(v6_pre[3])
-            if not np.all(np.isfinite(v6)):
+            v6_base = self._cam_twist_to_base_twist(v6)
+            if v6_base is None:
+                raise RuntimeError('TF transform camera->tcp->base unavailable')
+            v6_base = self._apply_speed_limits(v6_base)
+            if not np.all(np.isfinite(v6_base)):
                 raise ValueError('non-finite twist computed')
         except Exception as exc:
             self.publish_zero_twist()
@@ -746,9 +871,9 @@ class IbvsTwistControllerNode(Node):
             depth_for_fallback,
             depth_median,
             depth_fallback,
-            v6,
+            v6_base,
         )
-        self.twist_pub.publish(self._to_twist(v6))
+        self.twist_pub.publish(self._to_twist(v6_base))
         depth_median_txt = f'{depth_median:.3f}' if np.isfinite(depth_median) else 'n/a'
         depth_fallback_txt = f'{depth_fallback:.3f}' if np.isfinite(depth_fallback) else 'n/a'
         self.maybe_log_status(
@@ -756,7 +881,8 @@ class IbvsTwistControllerNode(Node):
             f"depth_valid={depth_valid}/{cur_xy.shape[0]} "
             f"depth_samples={depth_for_fallback}/{cur_xy.shape[0]} "
             f"depth_med={depth_median_txt}m depth_fb={depth_fallback_txt}m "
-            f"twist=[{v6[0]:+.3f},{v6[1]:+.3f},{v6[2]:+.3f},{v6[3]:+.3f},{v6[4]:+.3f},{v6[5]:+.3f}]"
+            f"twist_base=[{v6_base[0]:+.3f},{v6_base[1]:+.3f},{v6_base[2]:+.3f},"
+            f"{v6_base[3]:+.3f},{v6_base[4]:+.3f},{v6_base[5]:+.3f}]"
         )
 
 

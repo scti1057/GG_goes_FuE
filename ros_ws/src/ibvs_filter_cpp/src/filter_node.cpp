@@ -1,6 +1,7 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -25,6 +26,10 @@
 #include "std_msgs/msg/float32.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/u_int32.hpp"
+#include "tf2/exceptions.h"
+#include "tf2/time.h"
+#include "tf2_ros/buffer.h"
+#include "tf2_ros/transform_listener.h"
 
 namespace
 {
@@ -38,14 +43,23 @@ public:
     update_step_count_(0),
     update_success_count_(0),
     last_update_status_("NO UPDATE YET"),
-    latest_camera_velocity_(Eigen::Matrix<double, 6, 1>::Zero()),
+    latest_base_velocity_(Eigen::Matrix<double, 6, 1>::Zero()),
     has_velocity_stamp_(false),
-    has_last_predict_time_(false)
+    has_last_predict_time_(false),
+    tf_ready_base_tcp_(false),
+    tf_ready_tcp_cam_(false)
   {
     declareParameters();
     loadParameters();
 
     cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+    tf_timer_ = create_wall_timer(
+      std::chrono::milliseconds(500),
+      std::bind(&FilterNode::updateTfCache, this),
+      cb_group_);
 
     rclcpp::SubscriptionOptions sub_options;
     sub_options.callback_group = cb_group_;
@@ -94,6 +108,12 @@ public:
       get_logger(),
       "Filter Node gestartet. Modus: %s. Warte auf K-Matrix und Referenz...",
       filter_type_.c_str());
+    RCLCPP_INFO(
+      get_logger(),
+      "TF velocity conversion: base=%s tcp=%s camera=%s",
+      base_frame_.c_str(),
+      tcp_frame_.c_str(),
+      camera_frame_.c_str());
   }
 
 private:
@@ -115,8 +135,10 @@ private:
     declare_parameter<int64_t>("min_update_keypoints", 4);
     declare_parameter<bool>("force_relocalization", false);
 
-    declare_parameter<std::string>("base_frame", "base_link");
-    declare_parameter<std::string>("camera_frame", "camera_color_frame");
+    declare_parameter<std::string>("base_frame", "base");
+    declare_parameter<std::string>("tcp_frame", "tool0");
+    declare_parameter<std::string>("camera_frame", "camera_color_optical_frame");
+    declare_parameter<double>("tf_lookup_timeout_sec", 0.2);
     declare_parameter<std::string>(
       "camera_velocity_topic",
       "/cartesian_twist_passthrough_controller/cmd_vel");
@@ -156,7 +178,9 @@ private:
     force_relocalization_param_ = get_parameter("force_relocalization").as_bool();
 
     base_frame_ = get_parameter("base_frame").as_string();
+    tcp_frame_ = get_parameter("tcp_frame").as_string();
     camera_frame_ = get_parameter("camera_frame").as_string();
+    tf_lookup_timeout_sec_ = get_parameter("tf_lookup_timeout_sec").as_double();
     camera_velocity_topic_ = get_parameter("camera_velocity_topic").as_string();
     camera_velocity_deadband_linear_ = get_parameter("camera_velocity_deadband_linear").as_double();
     camera_velocity_deadband_angular_ = get_parameter("camera_velocity_deadband_angular").as_double();
@@ -169,6 +193,151 @@ private:
     filter_update_success_count_topic_ =
       get_parameter("filter_update_success_count_topic").as_string();
     active_count_topic_ = get_parameter("active_count_topic").as_string();
+  }
+
+  static Eigen::Matrix3d quatToRotMat(double x, double y, double z, double w)
+  {
+    const double n = x * x + y * y + z * z + w * w;
+    if (n <= 1e-12) {
+      return Eigen::Matrix3d::Identity();
+    }
+    const double s = 2.0 / n;
+    const double xx = x * x * s;
+    const double yy = y * y * s;
+    const double zz = z * z * s;
+    const double xy = x * y * s;
+    const double xz = x * z * s;
+    const double yz = y * z * s;
+    const double wx = w * x * s;
+    const double wy = w * y * s;
+    const double wz = w * z * s;
+
+    Eigen::Matrix3d r = Eigen::Matrix3d::Identity();
+    r(0, 0) = 1.0 - (yy + zz);
+    r(0, 1) = xy - wz;
+    r(0, 2) = xz + wy;
+    r(1, 0) = xy + wz;
+    r(1, 1) = 1.0 - (xx + zz);
+    r(1, 2) = yz - wx;
+    r(2, 0) = xz - wy;
+    r(2, 1) = yz + wx;
+    r(2, 2) = 1.0 - (xx + yy);
+    return r;
+  }
+
+  void maybeWarnTf(const std::string & text)
+  {
+    std::lock_guard<std::mutex> lock(tf_lock_);
+    const double now_sec = now().seconds();
+    if ((now_sec - last_tf_warn_sec_) > 1.0) {
+      last_tf_warn_sec_ = now_sec;
+      RCLCPP_WARN(get_logger(), "%s", text.c_str());
+    }
+  }
+
+  void updateTfCache()
+  {
+    const double timeout = std::max(1e-3, tf_lookup_timeout_sec_);
+
+    try {
+      const auto tf_base_tcp = tf_buffer_->lookupTransform(
+        base_frame_,
+        tcp_frame_,
+        tf2::TimePointZero,
+        tf2::durationFromSec(timeout));
+
+      const auto & q = tf_base_tcp.transform.rotation;
+      const Eigen::Matrix3d r_base_tcp = quatToRotMat(q.x, q.y, q.z, q.w);
+      bool first_ready = false;
+      {
+        std::lock_guard<std::mutex> lock(tf_lock_);
+        first_ready = !tf_ready_base_tcp_;
+        r_base_tcp_ = r_base_tcp;
+        tf_ready_base_tcp_ = true;
+      }
+      if (first_ready) {
+        RCLCPP_INFO(get_logger(), "TF ready (%s <- %s)", base_frame_.c_str(), tcp_frame_.c_str());
+      }
+    } catch (const tf2::TransformException & exc) {
+      maybeWarnTf(
+        "TF lookup failed (" + base_frame_ + " <- " + tcp_frame_ + "): " + std::string(exc.what()));
+    }
+
+    try {
+      const auto tf_tcp_cam = tf_buffer_->lookupTransform(
+        tcp_frame_,
+        camera_frame_,
+        tf2::TimePointZero,
+        tf2::durationFromSec(timeout));
+
+      const auto & t = tf_tcp_cam.transform.translation;
+      const auto & q = tf_tcp_cam.transform.rotation;
+      const Eigen::Vector3d p_tcp_cam(t.x, t.y, t.z);
+      const Eigen::Matrix3d r_tcp_cam = quatToRotMat(q.x, q.y, q.z, q.w);
+      bool first_ready = false;
+      {
+        std::lock_guard<std::mutex> lock(tf_lock_);
+        first_ready = !tf_ready_tcp_cam_;
+        p_tcp_cam_ = p_tcp_cam;
+        r_tcp_cam_ = r_tcp_cam;
+        tf_ready_tcp_cam_ = true;
+      }
+      if (first_ready) {
+        RCLCPP_INFO(
+          get_logger(),
+          "TF ready (%s <- %s), p_tcp_cam=[%+.3f,%+.3f,%+.3f]",
+          tcp_frame_.c_str(),
+          camera_frame_.c_str(),
+          p_tcp_cam.x(),
+          p_tcp_cam.y(),
+          p_tcp_cam.z());
+      }
+    } catch (const tf2::TransformException & exc) {
+      maybeWarnTf(
+        "TF lookup failed (" + tcp_frame_ + " <- " + camera_frame_ + "): " + std::string(exc.what()));
+    }
+  }
+
+  bool transformBaseTwistToCamera(
+    const Eigen::Matrix<double, 6, 1> & v_base,
+    Eigen::Matrix<double, 6, 1> & v_cam)
+  {
+    bool ready = false;
+    {
+      std::lock_guard<std::mutex> lock(tf_lock_);
+      ready = tf_ready_base_tcp_ && tf_ready_tcp_cam_;
+    }
+    if (!ready) {
+      updateTfCache();
+    }
+
+    Eigen::Matrix3d r_base_tcp = Eigen::Matrix3d::Identity();
+    Eigen::Matrix3d r_tcp_cam = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d p_tcp_cam = Eigen::Vector3d::Zero();
+    {
+      std::lock_guard<std::mutex> lock(tf_lock_);
+      if (!(tf_ready_base_tcp_ && tf_ready_tcp_cam_)) {
+        return false;
+      }
+      r_base_tcp = r_base_tcp_;
+      r_tcp_cam = r_tcp_cam_;
+      p_tcp_cam = p_tcp_cam_;
+    }
+
+    const Eigen::Vector3d v_base_lin(v_base(0), v_base(1), v_base(2));
+    const Eigen::Vector3d w_base(v_base(3), v_base(4), v_base(5));
+
+    const Eigen::Matrix3d r_tcp_base = r_base_tcp.transpose();
+    const Eigen::Vector3d w_tcp = r_tcp_base * w_base;
+    const Eigen::Vector3d v_tcp = r_tcp_base * v_base_lin;
+    const Eigen::Vector3d v_cam_point_tcp = v_tcp + w_tcp.cross(p_tcp_cam);
+
+    const Eigen::Matrix3d r_cam_tcp = r_tcp_cam.transpose();
+    const Eigen::Vector3d w_cam = r_cam_tcp * w_tcp;
+    const Eigen::Vector3d v_cam_lin = r_cam_tcp * v_cam_point_tcp;
+
+    v_cam << v_cam_lin.x(), v_cam_lin.y(), v_cam_lin.z(), w_cam.x(), w_cam.y(), w_cam.z();
+    return true;
   }
 
   void camInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
@@ -241,8 +410,13 @@ private:
     double next_deadband_lin = camera_velocity_deadband_linear_;
     double next_deadband_ang = camera_velocity_deadband_angular_;
     double next_stale_timeout = camera_velocity_stale_timeout_;
+    std::string next_base_frame = base_frame_;
+    std::string next_tcp_frame = tcp_frame_;
+    std::string next_camera_frame = camera_frame_;
+    double next_tf_lookup_timeout = tf_lookup_timeout_sec_;
 
     bool relocalization_requested = false;
+    bool tf_cfg_changed = false;
 
     for (const auto & p : params) {
       if (p.get_name() == "filter_type") {
@@ -356,6 +530,23 @@ private:
           return result;
         }
         next_stale_timeout = p.as_double();
+      } else if (p.get_name() == "base_frame") {
+        next_base_frame = p.as_string();
+        tf_cfg_changed = true;
+      } else if (p.get_name() == "tcp_frame") {
+        next_tcp_frame = p.as_string();
+        tf_cfg_changed = true;
+      } else if (p.get_name() == "camera_frame") {
+        next_camera_frame = p.as_string();
+        tf_cfg_changed = true;
+      } else if (p.get_name() == "tf_lookup_timeout_sec") {
+        if (p.as_double() <= 0.0) {
+          result.successful = false;
+          result.reason = "tf_lookup_timeout_sec must be > 0";
+          return result;
+        }
+        next_tf_lookup_timeout = p.as_double();
+        tf_cfg_changed = true;
       }
     }
 
@@ -385,8 +576,18 @@ private:
     camera_velocity_deadband_linear_ = next_deadband_lin;
     camera_velocity_deadband_angular_ = next_deadband_ang;
     camera_velocity_stale_timeout_ = next_stale_timeout;
+    base_frame_ = next_base_frame;
+    tcp_frame_ = next_tcp_frame;
+    camera_frame_ = next_camera_frame;
+    tf_lookup_timeout_sec_ = next_tf_lookup_timeout;
     if (!has_runtime_depth_) {
       runtime_z_depth_ = z_depth_;
+    }
+
+    if (tf_cfg_changed) {
+      std::lock_guard<std::mutex> tf_guard(tf_lock_);
+      tf_ready_base_tcp_ = false;
+      tf_ready_tcp_cam_ = false;
     }
 
     if (filter_ != nullptr) {
@@ -453,8 +654,8 @@ private:
 
   void cameraVelocityCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
   {
-    Eigen::Matrix<double, 6, 1> twist;
-    twist <<
+    Eigen::Matrix<double, 6, 1> twist_base;
+    twist_base <<
       msg->linear.x,
       msg->linear.y,
       msg->linear.z,
@@ -463,29 +664,29 @@ private:
       msg->angular.z;
 
     for (int i = 0; i < 3; ++i) {
-      if (std::abs(twist(i)) < camera_velocity_deadband_linear_) {
-        twist(i) = 0.0;
+      if (std::abs(twist_base(i)) < camera_velocity_deadband_linear_) {
+        twist_base(i) = 0.0;
       }
-      if (std::abs(twist(i + 3)) < camera_velocity_deadband_angular_) {
-        twist(i + 3) = 0.0;
+      if (std::abs(twist_base(i + 3)) < camera_velocity_deadband_angular_) {
+        twist_base(i + 3) = 0.0;
       }
     }
 
     std::lock_guard<std::mutex> pose_lock(pose_lock_);
-    latest_camera_velocity_ = twist;
+    latest_base_velocity_ = twist_base;
     latest_velocity_stamp_ = now();
     has_velocity_stamp_ = true;
   }
 
   Eigen::Matrix<double, 6, 1> getCameraVelocityFromTopic()
   {
-    Eigen::Matrix<double, 6, 1> twist;
+    Eigen::Matrix<double, 6, 1> twist_base;
     rclcpp::Time stamp;
     bool has_stamp = false;
 
     {
       std::lock_guard<std::mutex> pose_lock(pose_lock_);
-      twist = latest_camera_velocity_;
+      twist_base = latest_base_velocity_;
       stamp = latest_velocity_stamp_;
       has_stamp = has_velocity_stamp_;
     }
@@ -498,7 +699,15 @@ private:
     if (age > camera_velocity_stale_timeout_) {
       return Eigen::Matrix<double, 6, 1>::Zero();
     }
-    return twist;
+
+    Eigen::Matrix<double, 6, 1> twist_cam = Eigen::Matrix<double, 6, 1>::Zero();
+    if (!transformBaseTwistToCamera(twist_base, twist_cam)) {
+      maybeWarnTf(
+        "Velocity transform unavailable ("
+        + base_frame_ + " -> " + camera_frame_ + "). Prediction uses zero twist.");
+      return Eigen::Matrix<double, 6, 1>::Zero();
+    }
+    return twist_cam;
   }
 
   double getPredictDt()
@@ -600,18 +809,10 @@ private:
     return std::isfinite(z) && z > z_min && z < z_max;
   }
 
-  static Eigen::Matrix<double, 6, 1> transformTwistEeToCam(
-    const Eigen::Matrix<double, 6, 1> & v_ee)
-  {
-    Eigen::Matrix<double, 6, 1> out;
-    out << -v_ee(0), v_ee(1), -v_ee(2), -v_ee(3), v_ee(4), -v_ee(5);
-    return out;
-  }
-
   Eigen::VectorXd predictDepthVector(
     const Eigen::MatrixXd & pts_pixel,
     const Eigen::VectorXd & z_in,
-    const Eigen::Matrix<double, 6, 1> & v_ee,
+    const Eigen::Matrix<double, 6, 1> & v_cam,
     double dt,
     double z_fallback) const
   {
@@ -621,7 +822,6 @@ private:
       return out;
     }
 
-    const Eigen::Matrix<double, 6, 1> v_cam = transformTwistEeToCam(v_ee);
     const Eigen::Matrix3d K_inv = K_.inverse();
 
     for (int i = 0; i < n; ++i) {
@@ -658,7 +858,7 @@ private:
     }
 
     const double dt = getPredictDt();
-    const Eigen::Matrix<double, 6, 1> v_ee = getCameraVelocityFromTopic();
+    const Eigen::Matrix<double, 6, 1> v_cam = getCameraVelocityFromTopic();
 
     std::vector<int64_t> active_ref_ids;
     Eigen::MatrixXd filtered_current_pts;
@@ -717,13 +917,13 @@ private:
         z_per_feature(static_cast<Eigen::Index>(i)) = z_sel;
       }
 
-      filter_->predict(v_ee, z_per_feature, predict_z, dt);
+      filter_->predict(v_cam, z_per_feature, predict_z, dt);
 
       if (pre_n > 0) {
         const Eigen::VectorXd z_pred = predictDepthVector(
           filtered_pts_before.leftCols(static_cast<Eigen::Index>(pre_n)),
           z_per_feature,
-          v_ee,
+          v_cam,
           dt,
           predict_z);
         for (size_t i = 0; i < pre_n; ++i) {
@@ -952,7 +1152,9 @@ private:
   bool force_relocalization_param_;
 
   std::string base_frame_;
+  std::string tcp_frame_;
   std::string camera_frame_;
+  double tf_lookup_timeout_sec_;
   std::string camera_velocity_topic_;
   double camera_velocity_deadband_linear_;
   double camera_velocity_deadband_angular_;
@@ -983,16 +1185,25 @@ private:
 
   std::mutex lock_;
   std::mutex pose_lock_;
+  std::mutex tf_lock_;
 
-  Eigen::Matrix<double, 6, 1> latest_camera_velocity_;
+  Eigen::Matrix<double, 6, 1> latest_base_velocity_;
   rclcpp::Time latest_velocity_stamp_;
   bool has_velocity_stamp_;
 
   rclcpp::Time last_predict_time_;
   bool has_last_predict_time_;
+  bool tf_ready_base_tcp_;
+  bool tf_ready_tcp_cam_;
+  double last_tf_warn_sec_ = 0.0;
+  Eigen::Matrix3d r_base_tcp_ = Eigen::Matrix3d::Identity();
+  Eigen::Matrix3d r_tcp_cam_ = Eigen::Matrix3d::Identity();
+  Eigen::Vector3d p_tcp_cam_ = Eigen::Vector3d::Zero();
 
   rclcpp::CallbackGroup::SharedPtr cb_group_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameters_callback_handle_;
+  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr sub_cam_info_;
   rclcpp::Subscription<ibvs_msgs::msg::Keypoints>::SharedPtr sub_ref_;
@@ -1008,6 +1219,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::UInt32>::SharedPtr pub_active_count_;
 
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::TimerBase::SharedPtr tf_timer_;
 };
 
 }  // namespace

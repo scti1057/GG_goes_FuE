@@ -110,7 +110,7 @@ Eigen::VectorXd ExtendedKalmanFilter::computePixelVelocities(
 }
 
 void ExtendedKalmanFilter::predict(
-  const Eigen::Matrix<double, 6, 1> & v_ee,
+  const Eigen::Matrix<double, 6, 1> & v_cam,
   const Eigen::VectorXd & z_per_feature,
   double z_fallback,
   double dt)
@@ -119,7 +119,6 @@ void ExtendedKalmanFilter::predict(
     return;
   }
 
-  const Eigen::Matrix<double, 6, 1> v_cam = transformTwistEeToCam(v_ee);
   const Eigen::VectorXd x_old = x_;
   const Eigen::VectorXd s_dot = computePixelVelocities(x_old, v_cam, z_per_feature, z_fallback);
 
@@ -381,7 +380,7 @@ Eigen::MatrixXd UnscentedKalmanFilter::generateSigmaPoints(const Eigen::VectorXd
 }
 
 void UnscentedKalmanFilter::predict(
-  const Eigen::Matrix<double, 6, 1> & v_ee,
+  const Eigen::Matrix<double, 6, 1> & v_cam,
   const Eigen::VectorXd & z_per_feature,
   double z_fallback,
   double dt)
@@ -389,8 +388,6 @@ void UnscentedKalmanFilter::predict(
   if (!initialized_ || L_ <= 0) {
     return;
   }
-
-  const Eigen::Matrix<double, 6, 1> v_cam = transformTwistEeToCam(v_ee);
 
   const Eigen::MatrixXd sigmas = generateSigmaPoints(x_, P_);
   Eigen::MatrixXd sigmas_pred = Eigen::MatrixXd::Zero(sigmas.rows(), sigmas.cols());
@@ -604,7 +601,7 @@ Eigen::VectorXd ErrorStateKalmanFilter::computePixelVelocities(
 }
 
 void ErrorStateKalmanFilter::predict(
-  const Eigen::Matrix<double, 6, 1> & v_ee,
+  const Eigen::Matrix<double, 6, 1> & v_cam,
   const Eigen::VectorXd & z_per_feature,
   double z_fallback,
   double dt)
@@ -612,8 +609,6 @@ void ErrorStateKalmanFilter::predict(
   if (!initialized_ || L_ <= 0) {
     return;
   }
-
-  const Eigen::Matrix<double, 6, 1> v_cam = transformTwistEeToCam(v_ee);
 
   const Eigen::VectorXd x_nom_old = x_nom_;
   const Eigen::VectorXd s_dot = computePixelVelocities(
@@ -807,7 +802,7 @@ void StandardKalmanFilter::forceRelocalization()
 }
 
 void StandardKalmanFilter::predict(
-  const Eigen::Matrix<double, 6, 1> & /*v_ee*/,
+  const Eigen::Matrix<double, 6, 1> & /*v_cam*/,
   const Eigen::VectorXd & /*z_per_feature*/,
   double /*z_fallback*/,
   double dt)

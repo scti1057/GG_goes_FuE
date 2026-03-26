@@ -14,6 +14,8 @@ find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(ibvs_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 add_library(ibvs_filter_core
   src/base_filter.cpp
@@ -44,6 +46,8 @@ ament_target_dependencies(filter_node
   sensor_msgs
   std_msgs
   ibvs_msgs
+  tf2
+  tf2_ros
 )
 
 install(
