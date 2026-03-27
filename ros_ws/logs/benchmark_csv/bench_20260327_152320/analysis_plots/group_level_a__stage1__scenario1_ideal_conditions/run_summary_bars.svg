@@ -1,0 +1,51 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1320' height='760'>
+<rect x='0' y='0' width='100%' height='100%' fill='white'/>
+<text x='660.0' y='28' text-anchor='middle' font-size='22'>level_a | stage1 | scenario1_ideal_conditions | run summary</text>
+<rect x='90' y='55' width='1195' height='545' fill='none' stroke='#333' stroke-width='1.2'/>
+<line x1='84.00' y1='600.00' x2='90.00' y2='600.00' stroke='#333'/>
+<text x='80.00' y='604.00' text-anchor='end' font-size='12'>0</text>
+<line x1='84.00' y1='491.00' x2='90.00' y2='491.00' stroke='#333'/>
+<text x='80.00' y='495.00' text-anchor='end' font-size='12'>158</text>
+<line x1='84.00' y1='382.00' x2='90.00' y2='382.00' stroke='#333'/>
+<text x='80.00' y='386.00' text-anchor='end' font-size='12'>315</text>
+<line x1='84.00' y1='273.00' x2='90.00' y2='273.00' stroke='#333'/>
+<text x='80.00' y='277.00' text-anchor='end' font-size='12'>473</text>
+<line x1='84.00' y1='164.00' x2='90.00' y2='164.00' stroke='#333'/>
+<text x='80.00' y='168.00' text-anchor='end' font-size='12'>630</text>
+<line x1='84.00' y1='55.00' x2='90.00' y2='55.00' stroke='#333'/>
+<text x='80.00' y='59.00' text-anchor='end' font-size='12'>788</text>
+<rect x='112.36' y='600.00' width='37.80' height='0.00' fill='#1f77b4' opacity='0.85'/>
+<rect x='154.36' y='600.00' width='37.80' height='0.00' fill='#ff7f0e' opacity='0.85'/>
+<rect x='196.36' y='600.00' width='37.80' height='0.00' fill='#2ca02c' opacity='0.85'/>
+<text x='175.36' y='618.00' transform='rotate(32 175.36,618.00)' text-anchor='start' font-size='11'>run00</text>
+<rect x='283.07' y='600.00' width='37.80' height='0.00' fill='#1f77b4' opacity='0.85'/>
+<rect x='325.07' y='600.00' width='37.80' height='0.00' fill='#ff7f0e' opacity='0.85'/>
+<rect x='367.07' y='600.00' width='37.80' height='0.00' fill='#2ca02c' opacity='0.85'/>
+<text x='346.07' y='618.00' transform='rotate(32 346.07,618.00)' text-anchor='start' font-size='11'>run01</text>
+<rect x='453.79' y='600.00' width='37.80' height='0.00' fill='#1f77b4' opacity='0.85'/>
+<rect x='495.79' y='599.91' width='37.80' height='0.09' fill='#ff7f0e' opacity='0.85'/>
+<rect x='537.79' y='158.67' width='37.80' height='441.33' fill='#2ca02c' opacity='0.85'/>
+<text x='516.79' y='618.00' transform='rotate(32 516.79,618.00)' text-anchor='start' font-size='11'>run01</text>
+<rect x='624.50' y='600.00' width='37.80' height='0.00' fill='#1f77b4' opacity='0.85'/>
+<rect x='666.50' y='599.91' width='37.80' height='0.09' fill='#ff7f0e' opacity='0.85'/>
+<rect x='708.50' y='156.70' width='37.80' height='443.30' fill='#2ca02c' opacity='0.85'/>
+<text x='687.50' y='618.00' transform='rotate(32 687.50,618.00)' text-anchor='start' font-size='11'>run02</text>
+<rect x='795.21' y='600.00' width='37.80' height='0.00' fill='#1f77b4' opacity='0.85'/>
+<rect x='837.21' y='599.91' width='37.80' height='0.09' fill='#ff7f0e' opacity='0.85'/>
+<rect x='879.21' y='55.00' width='37.80' height='545.00' fill='#2ca02c' opacity='0.85'/>
+<text x='858.21' y='618.00' transform='rotate(32 858.21,618.00)' text-anchor='start' font-size='11'>run03</text>
+<rect x='965.93' y='600.00' width='37.80' height='0.00' fill='#1f77b4' opacity='0.85'/>
+<rect x='1007.93' y='599.91' width='37.80' height='0.09' fill='#ff7f0e' opacity='0.85'/>
+<rect x='1049.93' y='143.83' width='37.80' height='456.17' fill='#2ca02c' opacity='0.85'/>
+<text x='1028.93' y='618.00' transform='rotate(32 1028.93,618.00)' text-anchor='start' font-size='11'>run04</text>
+<rect x='1136.64' y='600.00' width='37.80' height='0.00' fill='#1f77b4' opacity='0.85'/>
+<rect x='1178.64' y='599.91' width='37.80' height='0.09' fill='#ff7f0e' opacity='0.85'/>
+<rect x='1220.64' y='156.11' width='37.80' height='443.89' fill='#2ca02c' opacity='0.85'/>
+<text x='1199.64' y='618.00' transform='rotate(32 1199.64,618.00)' text-anchor='start' font-size='11'>run05</text>
+<rect x='102' y='63' width='16' height='10' fill='#1f77b4'/>
+<text x='124' y='73' font-size='12'>time_to_goal [s]</text>
+<rect x='342' y='63' width='16' height='10' fill='#ff7f0e'/>
+<text x='364' y='73' font-size='12'>path_length [m]</text>
+<rect x='582' y='63' width='16' height='10' fill='#2ca02c'/>
+<text x='604' y='73' font-size='12'>rms_auc [px*s]</text>
+</svg>

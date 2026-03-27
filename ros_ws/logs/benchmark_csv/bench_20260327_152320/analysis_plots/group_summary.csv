@@ -1,0 +1,2 @@
+level,stage,scenario,runs,success_count,success_rate,timeout_count,time_to_goal_median_s,time_to_goal_mean_s,ibvs_rms_mean_px,path_length_mean_m
+level_a,stage1,scenario1_ideal_conditions,7,0,0.0,0,nan,nan,35.52209415644508,0.13367684540167163

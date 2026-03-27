@@ -1,0 +1,78 @@
+{
+  "angular_kp": 1.4,
+  "benchmark_pre_run_wait_sec": 5.0,
+  "benchmark_repetitions": 5,
+  "benchmark_timeout_sec": 20.0,
+  "camera_node_name": "/camera/camera",
+  "cmd_vel_topic": "/cartesian_twist_passthrough_controller/cmd_vel",
+  "control_rate_hz": 30.0,
+  "controller_node_name": "/ibvs_twist_controller_node",
+  "default_filter_type": "ekf",
+  "detector_device": "cuda",
+  "detector_top_k": 1024,
+  "detector_type": "xfeat",
+  "filter_camera_velocity_topic": "/cartesian_twist_passthrough_controller/cmd_vel",
+  "filter_gate_threshold": 20.0,
+  "filter_max_active_keypoints": 30,
+  "filter_min_init_keypoints": 8,
+  "filter_min_update_keypoints": 1,
+  "filter_node_name": "/ibvs_filter_node",
+  "filter_predict_rate": 120.0,
+  "filter_q_noise": 2.0,
+  "filter_r_noise": 1.1,
+  "filter_z_depth": 0.25,
+  "goal_hold_sec": 0.35,
+  "goal_pose": {
+    "quat_xyzw": [
+      -0.03211125906353233,
+      0.9994843004094865,
+      1.4636329313328436e-05,
+      7.879837033743734e-06
+    ],
+    "xyz": [
+      0.08455803602130692,
+      -0.37000442669807265,
+      0.3995409754780461
+    ]
+  },
+  "goal_reached_topic": "/ibvs/control/goal_reached",
+  "init_wait_timeout_sec": 20.0,
+  "keypoint_depth_topic": "/camera/camera/aligned_depth_to_color/image_raw/compressedDepth",
+  "keypoint_input_topic": "/camera/camera/color/image_raw/compressed",
+  "keypoint_node_name": "/keypoint_node",
+  "keypoints_topic": "/ibvs/keypoints",
+  "linear_kp": 1.2,
+  "local_rescue_mode_topic_node": "/descriptor_matcher_node",
+  "log_root": "/home/ros_ws/logs/benchmark_csv",
+  "match_threshold": 0.85,
+  "matches_topic": "/ibvs/matches",
+  "max_angular_speed": 0.45,
+  "max_linear_speed": 0.03,
+  "move_timeout_sec": 20.0,
+  "mutual_check": true,
+  "orientation_tolerance_rad": 0.04,
+  "pose_stale_timeout_sec": 1.0,
+  "pose_topic": "/tcp_pose_broadcaster/pose",
+  "position_tolerance_m": 0.003,
+  "prefilter_enabled": false,
+  "prefilter_top_k": 100,
+  "reference_init_duration_sec": 5.0,
+  "reference_top_k": 300,
+  "reference_topic": "/ibvs/reference/keypoints",
+  "start_pose": {
+    "quat_xyzw": [
+      -0.032087211708986714,
+      0.9994850727143936,
+      -1.4448072789658794e-05,
+      7.556405875675389e-06
+    ],
+    "xyz": [
+      0.02974916285610204,
+      -0.3913484495803512,
+      0.5279881983274837
+    ]
+  },
+  "tracking_keep_aligned_depth": true,
+  "wx_debug_topic": "/ibvs/control/wx_debug",
+  "xfeat_repo_dir": ""
+}
