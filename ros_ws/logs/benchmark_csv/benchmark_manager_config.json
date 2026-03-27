@@ -2,7 +2,7 @@
   "angular_kp": 1.4,
   "benchmark_pre_run_wait_sec": 5.0,
   "benchmark_repetitions": 5,
-  "benchmark_timeout_sec": 20.0,
+  "benchmark_timeout_sec": 30.0,
   "camera_node_name": "/camera/camera",
   "cmd_vel_topic": "/cartesian_twist_passthrough_controller/cmd_vel",
   "control_rate_hz": 30.0,
@@ -12,27 +12,27 @@
   "detector_top_k": 1024,
   "detector_type": "xfeat",
   "filter_camera_velocity_topic": "/cartesian_twist_passthrough_controller/cmd_vel",
-  "filter_gate_threshold": 20.0,
+  "filter_gate_threshold": 3.0,
   "filter_max_active_keypoints": 30,
   "filter_min_init_keypoints": 8,
-  "filter_min_update_keypoints": 1,
+  "filter_min_update_keypoints": 10,
   "filter_node_name": "/ibvs_filter_node",
-  "filter_predict_rate": 120.0,
+  "filter_predict_rate": 30.0,
   "filter_q_noise": 2.0,
-  "filter_r_noise": 1.1,
+  "filter_r_noise": 1.5,
   "filter_z_depth": 0.25,
-  "goal_hold_sec": 0.35,
+  "goal_hold_sec": 0.5,
   "goal_pose": {
     "quat_xyzw": [
-      -0.03211125906353233,
-      0.9994843004094865,
-      1.4636329313328436e-05,
-      7.879837033743734e-06
+      -0.03212693238149823,
+      0.9994837967751972,
+      -1.3872452312171372e-05,
+      2.673253367171708e-06
     ],
     "xyz": [
-      0.08455803602130692,
-      -0.37000442669807265,
-      0.3995409754780461
+      0.017816422439204307,
+      -0.44501480582820563,
+      0.3398384582306232
     ]
   },
   "goal_reached_topic": "/ibvs/control/goal_reached",
@@ -61,15 +61,15 @@
   "reference_topic": "/ibvs/reference/keypoints",
   "start_pose": {
     "quat_xyzw": [
-      -0.032087211708986714,
-      0.9994850727143936,
-      -1.4448072789658794e-05,
-      7.556405875675389e-06
+      -0.1962669803747257,
+      0.9805504945374062,
+      -4.419350966778277e-06,
+      7.583183216463774e-06
     ],
     "xyz": [
-      0.02974916285610204,
-      -0.3913484495803512,
-      0.5279881983274837
+      -0.041791949172581534,
+      -0.41031474362856757,
+      0.46292773877000437
     ]
   },
   "tracking_keep_aligned_depth": true,

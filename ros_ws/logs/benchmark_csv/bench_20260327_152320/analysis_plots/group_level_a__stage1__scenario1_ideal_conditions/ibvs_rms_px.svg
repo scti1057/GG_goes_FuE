@@ -3,29 +3,29 @@
 <text x='640.0' y='28' text-anchor='middle' font-size='22'>level_a | stage1 | scenario1_ideal_conditions | ibvs_rms_px</text>
 <rect x='85' y='55' width='1155' height='625' fill='none' stroke='#333' stroke-width='1.2'/>
 <line x1='85.00' y1='680.00' x2='85.00' y2='686.00' stroke='#333'/>
-<text x='85.00' y='704.00' text-anchor='middle' font-size='12'>0.00</text>
-<line x1='316.00' y1='680.00' x2='316.00' y2='686.00' stroke='#333'/>
-<text x='316.00' y='704.00' text-anchor='middle' font-size='12'>3.92</text>
-<line x1='547.00' y1='680.00' x2='547.00' y2='686.00' stroke='#333'/>
-<text x='547.00' y='704.00' text-anchor='middle' font-size='12'>7.83</text>
-<line x1='778.00' y1='680.00' x2='778.00' y2='686.00' stroke='#333'/>
-<text x='778.00' y='704.00' text-anchor='middle' font-size='12'>11.75</text>
-<line x1='1009.00' y1='680.00' x2='1009.00' y2='686.00' stroke='#333'/>
-<text x='1009.00' y='704.00' text-anchor='middle' font-size='12'>15.67</text>
-<line x1='1240.00' y1='680.00' x2='1240.00' y2='686.00' stroke='#333'/>
-<text x='1240.00' y='704.00' text-anchor='middle' font-size='12'>19.58</text>
-<line x1='79.00' y1='680.00' x2='85.00' y2='680.00' stroke='#333'/>
-<text x='75.00' y='684.00' text-anchor='end' font-size='12'>3.52</text>
-<line x1='79.00' y1='555.00' x2='85.00' y2='555.00' stroke='#333'/>
-<text x='75.00' y='559.00' text-anchor='end' font-size='12'>26.7</text>
-<line x1='79.00' y1='430.00' x2='85.00' y2='430.00' stroke='#333'/>
-<text x='75.00' y='434.00' text-anchor='end' font-size='12'>49.9</text>
-<line x1='79.00' y1='305.00' x2='85.00' y2='305.00' stroke='#333'/>
-<text x='75.00' y='309.00' text-anchor='end' font-size='12'>73</text>
-<line x1='79.00' y1='180.00' x2='85.00' y2='180.00' stroke='#333'/>
-<text x='75.00' y='184.00' text-anchor='end' font-size='12'>96.2</text>
-<line x1='79.00' y1='55.00' x2='85.00' y2='55.00' stroke='#333'/>
-<text x='75.00' y='59.00' text-anchor='end' font-size='12'>119</text>
+<text x='85.00' y='704.00' text-anchor='middle' font-size='12'>0</text>
+<line x1='379.88' y1='680.00' x2='379.88' y2='686.00' stroke='#333'/>
+<text x='379.88' y='704.00' text-anchor='middle' font-size='12'>5</text>
+<line x1='674.77' y1='680.00' x2='674.77' y2='686.00' stroke='#333'/>
+<text x='674.77' y='704.00' text-anchor='middle' font-size='12'>10</text>
+<line x1='969.65' y1='680.00' x2='969.65' y2='686.00' stroke='#333'/>
+<text x='969.65' y='704.00' text-anchor='middle' font-size='12'>15</text>
+<line x1='1264.54' y1='680.00' x2='1264.54' y2='686.00' stroke='#333'/>
+<text x='1264.54' y='704.00' text-anchor='middle' font-size='12'>20</text>
+<line x1='79.00' y1='698.99' x2='85.00' y2='698.99' stroke='#333'/>
+<text x='75.00' y='702.99' text-anchor='end' font-size='12'>0</text>
+<line x1='79.00' y1='591.08' x2='85.00' y2='591.08' stroke='#333'/>
+<text x='75.00' y='595.08' text-anchor='end' font-size='12'>20</text>
+<line x1='79.00' y1='483.17' x2='85.00' y2='483.17' stroke='#333'/>
+<text x='75.00' y='487.17' text-anchor='end' font-size='12'>40</text>
+<line x1='79.00' y1='375.26' x2='85.00' y2='375.26' stroke='#333'/>
+<text x='75.00' y='379.26' text-anchor='end' font-size='12'>60</text>
+<line x1='79.00' y1='267.35' x2='85.00' y2='267.35' stroke='#333'/>
+<text x='75.00' y='271.35' text-anchor='end' font-size='12'>80</text>
+<line x1='79.00' y1='159.44' x2='85.00' y2='159.44' stroke='#333'/>
+<text x='75.00' y='163.44' text-anchor='end' font-size='12'>100</text>
+<line x1='79.00' y1='51.53' x2='85.00' y2='51.53' stroke='#333'/>
+<text x='75.00' y='55.53' text-anchor='end' font-size='12'>120</text>
 <polyline points='85.00,63.81 105.87,87.54 126.77,131.29 147.73,155.43 168.66,193.36 189.59,225.32 210.60,249.23 231.54,284.80 252.43,303.19 273.34,322.54 294.29,350.55 315.22,367.88 336.35,385.00 358.00,401.46 379.02,424.80 399.96,433.51 420.84,459.72 441.76,479.63 463.14,493.18 484.09,504.16 504.98,522.94 525.92,536.47 546.80,552.06 567.75,561.20 588.63,571.38 609.51,579.15 630.42,588.36 651.38,595.57 672.44,603.70 693.59,608.94 714.59,617.91 735.56,624.00 756.53,629.10 777.46,630.72 798.43,636.46 819.32,640.73 840.26,644.50 861.35,653.02 882.28,647.13 903.22,647.95 924.13,651.05 945.39,655.54 966.39,657.36 987.61,662.60 1008.55,665.53 1029.45,670.16 1050.33,670.63 1071.25,673.15 1092.13,668.68 1113.03,672.66 1133.94,677.84 1154.84,669.68 1175.72,679.23 1196.62,680.00 1217.52,678.27' fill='none' stroke='#1f77b4' stroke-width='1.5' opacity='0.72'/>
 <line x1='1030' y1='71' x2='1052' y2='71' stroke='#1f77b4' stroke-width='2.4'/>
 <text x='1058' y='75' font-size='12'>run01</text>

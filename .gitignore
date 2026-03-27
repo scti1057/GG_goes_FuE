@@ -3,6 +3,7 @@
 /ros_ws/install/
 /ros_ws/log/
 *.log
+/ros_ws/logs/benchmark_csv/
 
 # Python artifacts
 __pycache__/

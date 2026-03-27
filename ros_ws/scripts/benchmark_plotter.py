@@ -23,6 +23,7 @@ try:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # noqa: E402
+    from matplotlib.ticker import MaxNLocator  # noqa: E402
 
     MATPLOTLIB_AVAILABLE = True
 except Exception:
@@ -93,7 +94,16 @@ def infer_stage_from_path(csv_path: Path) -> str:
 
 
 def find_csv_files(bench_dir: Path) -> list[Path]:
-    return sorted(p for p in bench_dir.rglob("*.csv") if p.is_file())
+    out: list[Path] = []
+    for p in bench_dir.rglob("*.csv"):
+        if not p.is_file():
+            continue
+        if "analysis_plots" in p.parts:
+            continue
+        if p.name in ("run_summary.csv", "group_summary.csv"):
+            continue
+        out.append(p)
+    return sorted(out)
 
 
 def compute_motion_start(
@@ -121,6 +131,11 @@ def compute_motion_start(
 def load_run(csv_path: Path, lin_eps: float, ang_eps: float) -> Optional[RunSeries]:
     with csv_path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            return None
+        req = {"t_rel_s", "run_index", "level", "stage", "scenario"}
+        if not req.issubset(set(reader.fieldnames)):
+            return None
         rows = list(reader)
     if not rows:
         return None
@@ -228,6 +243,7 @@ def compute_run_summary(run: RunSeries) -> dict[str, Any]:
         "goal_reached": reached,
         "timed_out": timed_out,
         "time_to_goal_s": time_to_goal,
+        "time_to_goal_or_timeout_s": (time_to_goal if np.isfinite(time_to_goal) else duration),
         "ibvs_rms_mean_px": safe_nanmean(rms),
         "ibvs_rms_max_px": safe_nanmax(rms),
         "ibvs_rms_auc_px_s": trapz_valid(rms, t),
@@ -294,6 +310,64 @@ def _finite_minmax(values: np.ndarray, default_min: float, default_max: float) -
     return vmin, vmax
 
 
+def _nice_step(raw_step: float) -> float:
+    if raw_step <= 0.0 or not np.isfinite(raw_step):
+        return 1.0
+    exp = math.floor(math.log10(raw_step))
+    base = 10.0 ** exp
+    for m in (1.0, 2.0, 5.0, 10.0):
+        step = m * base
+        if raw_step <= step:
+            return step
+    return 10.0 * base
+
+
+def _nice_ticks(vmin: float, vmax: float, target: int = 6) -> np.ndarray:
+    if not np.isfinite(vmin) or not np.isfinite(vmax):
+        return np.array([0.0, 1.0], dtype=np.float64)
+    if math.isclose(vmin, vmax, rel_tol=1e-12, abs_tol=1e-12):
+        pad = 1.0 if abs(vmin) < 1e-9 else abs(vmin) * 0.2
+        vmin, vmax = vmin - pad, vmax + pad
+    if vmax < vmin:
+        vmin, vmax = vmax, vmin
+    raw = (vmax - vmin) / max(1, target - 1)
+    step = _nice_step(raw)
+    start = math.floor(vmin / step) * step
+    end = math.ceil(vmax / step) * step
+    ticks = np.arange(start, end + 0.5 * step, step, dtype=np.float64)
+    if ticks.size > 12:
+        step = _nice_step(step * 1.5)
+        start = math.floor(vmin / step) * step
+        end = math.ceil(vmax / step) * step
+        ticks = np.arange(start, end + 0.5 * step, step, dtype=np.float64)
+    return ticks
+
+
+def _fmt_tick(v: float) -> str:
+    if not np.isfinite(v):
+        return ""
+    av = abs(v)
+    if av >= 10000.0 or (0.0 < av < 1e-3):
+        return f"{v:.2e}"
+    if av >= 100.0:
+        return f"{v:.0f}"
+    if av >= 10.0:
+        return f"{v:.1f}".rstrip("0").rstrip(".")
+    if av >= 1.0:
+        return f"{v:.2f}".rstrip("0").rstrip(".")
+    return f"{v:.3f}".rstrip("0").rstrip(".")
+
+
+def _rebase_to_first_valid(y: np.ndarray) -> np.ndarray:
+    out = y.copy()
+    mask = np.isfinite(out)
+    if np.count_nonzero(mask) == 0:
+        return out
+    first = float(out[np.where(mask)[0][0]])
+    out[mask] = out[mask] - first
+    return out
+
+
 def _decimate_xy(x: np.ndarray, y: np.ndarray, max_points: int = 1200) -> tuple[np.ndarray, np.ndarray]:
     n = int(x.size)
     if n <= max_points:
@@ -342,6 +416,11 @@ def _write_svg_line_plot(
     y_all = np.concatenate(all_y)
     xmin, xmax = _finite_minmax(x_all, 0.0, 1.0)
     ymin, ymax = _finite_minmax(y_all, 0.0, 1.0)
+    y_finite = y_all[np.isfinite(y_all)]
+    if y_finite.size > 0 and float(np.min(y_finite)) >= -1e-12 and ymin < 0.0:
+        ymin = 0.0
+        if ymax <= ymin:
+            ymax = ymin + 1.0
 
     def sx(x: float) -> float:
         if xmax <= xmin:
@@ -375,21 +454,22 @@ def _write_svg_line_plot(
         f"<rect x='{x0}' y='{y0}' width='{plot_w}' height='{plot_h}' fill='none' stroke='#333' stroke-width='1.2'/>"
     )
 
-    for i in range(6):
-        tx = xmin + (xmax - xmin) * (i / 5.0)
-        px = sx(tx)
+    x_ticks = _nice_ticks(xmin, xmax, target=7)
+    y_ticks = _nice_ticks(ymin, ymax, target=7)
+
+    for tx in x_ticks:
+        px = sx(float(tx))
         lines.append(
             f"<line x1='{px:.2f}' y1='{y0 + plot_h:.2f}' x2='{px:.2f}' y2='{y0 + plot_h + 6:.2f}' stroke='#333'/>"
         )
         lines.append(
-            f"<text x='{px:.2f}' y='{y0 + plot_h + 24:.2f}' text-anchor='middle' font-size='12'>{tx:.2f}</text>"
+            f"<text x='{px:.2f}' y='{y0 + plot_h + 24:.2f}' text-anchor='middle' font-size='12'>{_fmt_tick(float(tx))}</text>"
         )
-    for i in range(6):
-        ty = ymin + (ymax - ymin) * (i / 5.0)
-        py = sy(ty)
+    for ty in y_ticks:
+        py = sy(float(ty))
         lines.append(f"<line x1='{x0 - 6:.2f}' y1='{py:.2f}' x2='{x0:.2f}' y2='{py:.2f}' stroke='#333'/>")
         lines.append(
-            f"<text x='{x0 - 10:.2f}' y='{py + 4:.2f}' text-anchor='end' font-size='12'>{ty:.3g}</text>"
+            f"<text x='{x0 - 10:.2f}' y='{py + 4:.2f}' text-anchor='end' font-size='12'>{_fmt_tick(float(ty))}</text>"
         )
 
     for idx, (label, x, y) in enumerate(filtered_curves):
@@ -447,11 +527,13 @@ def _write_svg_grouped_bars(
     lines.append(f"<text x='{width/2:.1f}' y='28' text-anchor='middle' font-size='22'>{_svg_escape(title)}</text>")
     lines.append(f"<rect x='{x0}' y='{y0}' width='{plot_w}' height='{plot_h}' fill='none' stroke='#333' stroke-width='1.2'/>")
 
-    for i in range(6):
-        yv = vmax * (i / 5.0)
-        py = y0 + plot_h - (yv / vmax) * plot_h
+    y_ticks = _nice_ticks(0.0, vmax, target=7)
+    for yv in y_ticks:
+        py = y0 + plot_h - (float(yv) / vmax) * plot_h
         lines.append(f"<line x1='{x0-6:.2f}' y1='{py:.2f}' x2='{x0:.2f}' y2='{py:.2f}' stroke='#333'/>")
-        lines.append(f"<text x='{x0-10:.2f}' y='{py+4:.2f}' text-anchor='end' font-size='12'>{yv:.3g}</text>")
+        lines.append(
+            f"<text x='{x0-10:.2f}' y='{py+4:.2f}' text-anchor='end' font-size='12'>{_fmt_tick(float(yv))}</text>"
+        )
 
     for ci, cat in enumerate(categories):
         gx = x0 + (ci + 0.5) * group_w
@@ -481,6 +563,66 @@ def _write_svg_grouped_bars(
         f.write("\n".join(lines) + "\n")
 
 
+def _write_svg_run_summary_panels(
+    labels: list[str],
+    t_goal: np.ndarray,
+    path_len: np.ndarray,
+    rms_auc: np.ndarray,
+    title: str,
+    out_path: Path,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    width, height = 1320, 980
+    ml, mr, mt, mb = 95, 35, 60, 45
+    panel_gap = 36
+    panel_h = int((height - mt - mb - 2 * panel_gap) / 3)
+    plot_w = width - ml - mr
+    x0 = ml
+
+    panels = [
+        ("time_to_goal_or_timeout [s]", np.nan_to_num(t_goal, nan=0.0)),
+        ("path_length [m]", np.nan_to_num(path_len, nan=0.0)),
+        ("rms_auc [px*s]", np.nan_to_num(rms_auc, nan=0.0)),
+    ]
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c"]
+
+    lines: list[str] = []
+    lines.append(f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}'>")
+    lines.append("<rect x='0' y='0' width='100%' height='100%' fill='white'/>")
+    lines.append(f"<text x='{width/2:.1f}' y='32' text-anchor='middle' font-size='22'>{_svg_escape(title)}</text>")
+
+    n = max(1, len(labels))
+    for pi, (panel_title, vals) in enumerate(panels):
+        y0 = mt + pi * (panel_h + panel_gap)
+        _, vmax = _finite_minmax(vals.astype(np.float64), 0.0, 1.0)
+        vmax = max(vmax, 1e-9)
+        group_w = plot_w / n
+        bar_w = max(4.0, min(46.0, group_w * 0.75))
+        col = colors[pi % len(colors)]
+
+        lines.append(f"<rect x='{x0}' y='{y0}' width='{plot_w}' height='{panel_h}' fill='none' stroke='#333' stroke-width='1.1'/>")
+        lines.append(f"<text x='{x0 + 8}' y='{y0 + 18}' font-size='13'>{_svg_escape(panel_title)}</text>")
+
+        y_ticks = _nice_ticks(0.0, vmax, target=6)
+        for yv in y_ticks:
+            py = y0 + panel_h - (float(yv) / vmax) * panel_h
+            lines.append(f"<line x1='{x0-6:.2f}' y1='{py:.2f}' x2='{x0:.2f}' y2='{py:.2f}' stroke='#333'/>")
+            lines.append(f"<text x='{x0-10:.2f}' y='{py+4:.2f}' text-anchor='end' font-size='11'>{_fmt_tick(float(yv))}</text>")
+
+        for i, lab in enumerate(labels):
+            cx = x0 + (i + 0.5) * group_w
+            v = float(vals[i]) if i < vals.size else 0.0
+            h = (v / vmax) * panel_h
+            bx = cx - bar_w * 0.5
+            by = y0 + panel_h - h
+            lines.append(f"<rect x='{bx:.2f}' y='{by:.2f}' width='{bar_w:.2f}' height='{h:.2f}' fill='{col}' opacity='0.82'/>")
+            lines.append(f"<text x='{cx:.2f}' y='{y0 + panel_h + 16:.2f}' text-anchor='middle' font-size='10'>{_svg_escape(lab)}</text>")
+
+    lines.append("</svg>")
+    with out_path.open("w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def plot_metric_overlay(
     runs: list[RunSeries],
     metric: str,
@@ -489,17 +631,28 @@ def plot_metric_overlay(
     title: str,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    rebase_metric = metric in {
+        "local_rescue_attempts_delta",
+        "local_rescue_success_delta",
+        "local_rescue_reject_delta",
+    }
+
     if MATPLOTLIB_AVAILABLE:
         plt.figure(figsize=(11, 6))
         for run in runs:
             t = run.t_motion
             y = run.metrics[metric][run.motion_start_idx :]
+            if rebase_metric:
+                y = _rebase_to_first_valid(y)
             if t.size == 0:
                 continue
             plt.plot(t, y, alpha=0.45, linewidth=1.1, label=f"run{run.run_index:02d}")
         plt.xlabel("t from motion start [s]")
         plt.ylabel(y_label)
         plt.title(title)
+        ax = plt.gca()
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=8, steps=[1, 2, 5, 10]))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=8, steps=[1, 2, 5, 10]))
         if len(runs) <= 12:
             plt.legend(loc="best", fontsize=8, ncol=2)
         plt.grid(True, alpha=0.3)
@@ -510,7 +663,10 @@ def plot_metric_overlay(
 
     curves = []
     for run in runs:
-        curves.append((f"run{run.run_index:02d}", run.t_motion, run.metrics[metric][run.motion_start_idx :]))
+        y = run.metrics[metric][run.motion_start_idx :]
+        if rebase_metric:
+            y = _rebase_to_first_valid(y)
+        curves.append((f"run{run.run_index:02d}", run.t_motion, y))
     _write_svg_line_plot(
         curves=curves,
         title=title,
@@ -525,34 +681,39 @@ def plot_summary_bars(summary_rows: list[dict[str, Any]], out_path: Path, title:
     if not summary_rows:
         return
 
-    labels = [f"run{int(r['run_index']):02d}" for r in summary_rows]
-    t_goal = np.array([float(r["time_to_goal_s"]) for r in summary_rows], dtype=np.float64)
-    path_len = np.array([float(r["path_length_base_m"]) for r in summary_rows], dtype=np.float64)
-    rms_auc = np.array([float(r["ibvs_rms_auc_px_s"]) for r in summary_rows], dtype=np.float64)
+    ordered = sorted(summary_rows, key=lambda r: int(r["run_index"]))
+    labels = [f"run{int(r['run_index']):02d}" for r in ordered]
+    t_goal_or_timeout = np.array([float(r["time_to_goal_or_timeout_s"]) for r in ordered], dtype=np.float64)
+    path_len = np.array([float(r["path_length_base_m"]) for r in ordered], dtype=np.float64)
+    rms_auc = np.array([float(r["ibvs_rms_auc_px_s"]) for r in ordered], dtype=np.float64)
 
     if MATPLOTLIB_AVAILABLE:
-        x = np.arange(len(labels))
-        w = 0.26
-        plt.figure(figsize=(12, 6))
-        plt.bar(x - w, np.nan_to_num(t_goal, nan=0.0), width=w, label="time_to_goal [s]")
-        plt.bar(x, np.nan_to_num(path_len, nan=0.0), width=w, label="path_length [m]")
-        plt.bar(x + w, np.nan_to_num(rms_auc, nan=0.0), width=w, label="rms_auc [px*s]")
-        plt.xticks(x, labels, rotation=0)
-        plt.title(title)
-        plt.grid(True, axis="y", alpha=0.3)
-        plt.legend()
+        x = np.arange(len(labels), dtype=np.float64)
+        fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+        fig.suptitle(title)
+        panels = [
+            ("time_to_goal_or_timeout [s]", np.nan_to_num(t_goal_or_timeout, nan=0.0), "#1f77b4"),
+            ("path_length [m]", np.nan_to_num(path_len, nan=0.0), "#ff7f0e"),
+            ("rms_auc [px*s]", np.nan_to_num(rms_auc, nan=0.0), "#2ca02c"),
+        ]
+        for ax, (name, vals, color) in zip(axes, panels):
+            ax.bar(x, vals, color=color, width=0.75)
+            ax.set_ylabel(name)
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=7, steps=[1, 2, 5, 10]))
+            ax.grid(True, axis="y", alpha=0.3)
+        axes[-1].set_xticks(x, labels)
+        axes[-1].set_xlabel("run")
         plt.tight_layout()
+        plt.subplots_adjust(top=0.92)
         plt.savefig(out_path, dpi=170)
         plt.close()
         return
 
-    _write_svg_grouped_bars(
-        categories=labels,
-        series=[
-            ("time_to_goal [s]", np.nan_to_num(t_goal, nan=0.0)),
-            ("path_length [m]", np.nan_to_num(path_len, nan=0.0)),
-            ("rms_auc [px*s]", np.nan_to_num(rms_auc, nan=0.0)),
-        ],
+    _write_svg_run_summary_panels(
+        labels=labels,
+        t_goal=t_goal_or_timeout,
+        path_len=path_len,
+        rms_auc=rms_auc,
         title=title,
         out_path=out_path.with_suffix(".svg"),
     )
@@ -570,6 +731,7 @@ def aggregate_group_summaries(run_rows: list[dict[str, Any]]) -> list[dict[str, 
         success = sum(1 for r in rows if bool(r["goal_reached"]))
         timeout = sum(1 for r in rows if bool(r["timed_out"]))
         t_goal = np.array([float(r["time_to_goal_s"]) for r in rows], dtype=np.float64)
+        t_goal_or_timeout = np.array([float(r["time_to_goal_or_timeout_s"]) for r in rows], dtype=np.float64)
         rms_mean = np.array([float(r["ibvs_rms_mean_px"]) for r in rows], dtype=np.float64)
         path_len = np.array([float(r["path_length_base_m"]) for r in rows], dtype=np.float64)
         out.append(
@@ -583,6 +745,10 @@ def aggregate_group_summaries(run_rows: list[dict[str, Any]]) -> list[dict[str, 
                 "timeout_count": timeout,
                 "time_to_goal_median_s": float(np.nanmedian(t_goal)) if np.any(np.isfinite(t_goal)) else float("nan"),
                 "time_to_goal_mean_s": safe_nanmean(t_goal),
+                "time_to_goal_or_timeout_median_s": float(np.nanmedian(t_goal_or_timeout))
+                if np.any(np.isfinite(t_goal_or_timeout))
+                else float("nan"),
+                "time_to_goal_or_timeout_mean_s": safe_nanmean(t_goal_or_timeout),
                 "ibvs_rms_mean_px": safe_nanmean(rms_mean),
                 "path_length_mean_m": safe_nanmean(path_len),
             }
@@ -609,6 +775,7 @@ def plot_stage_comparison(group_rows: list[dict[str, Any]], out_path: Path) -> N
         plt.bar(x + w, np.nan_to_num(rms, nan=0.0), width=w, label="mean_ibvs_rms [px]")
         plt.xticks(x, labels, rotation=28, ha="right")
         plt.title("Group Comparison")
+        plt.gca().yaxis.set_major_locator(MaxNLocator(nbins=8, steps=[1, 2, 5, 10]))
         plt.grid(True, axis="y", alpha=0.3)
         plt.legend()
         plt.tight_layout()
@@ -646,12 +813,16 @@ def write_report(
     lines.append("")
     lines.append("## Group Summary")
     lines.append("")
-    lines.append("| level | stage | scenario | runs | success_rate | median_time_to_goal_s | mean_ibvs_rms_px |")
-    lines.append("|---|---|---:|---:|---:|---:|---:|")
+    lines.append(
+        "| level | stage | scenario | runs | success_rate | median_time_to_goal_s | "
+        "mean_time_to_goal_or_timeout_s | mean_ibvs_rms_px |"
+    )
+    lines.append("|---|---|---:|---:|---:|---:|---:|---:|")
     for r in group_rows:
         lines.append(
             f"| {r['level']} | {r['stage']} | {r['scenario']} | {r['runs']} | "
-            f"{float(r['success_rate']):.3f} | {float(r['time_to_goal_median_s']):.3f} | {float(r['ibvs_rms_mean_px']):.3f} |"
+            f"{float(r['success_rate']):.3f} | {float(r['time_to_goal_median_s']):.3f} | "
+            f"{float(r['time_to_goal_or_timeout_mean_s']):.3f} | {float(r['ibvs_rms_mean_px']):.3f} |"
         )
     lines.append("")
     lines.append("Generated files:")

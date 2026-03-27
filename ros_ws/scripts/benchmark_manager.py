@@ -171,7 +171,14 @@ def run_cmd(cmd: list[str], timeout_sec: float = 8.0) -> tuple[int, str]:
         out = (cp.stdout or "") + (cp.stderr or "")
         return cp.returncode, out.strip()
     except subprocess.TimeoutExpired as exc:
-        out = (exc.stdout or "") + (exc.stderr or "")
+        def _to_text(v: Any) -> str:
+            if v is None:
+                return ""
+            if isinstance(v, bytes):
+                return v.decode("utf-8", errors="replace")
+            return str(v)
+
+        out = _to_text(exc.stdout) + _to_text(exc.stderr)
         return 124, out.strip() if out.strip() else f"Timeout after {timeout_sec:.1f}s: {' '.join(cmd)}"
 
 
@@ -1008,6 +1015,9 @@ class BenchmarkRuntime:
 
     def start_controller(self) -> None:
         self._start_proc("ibvs_controller")
+        if not self.wait_for_node(self.node.controller_node_name, timeout_sec=8.0):
+            print(f"[proc] controller node did not appear: {self.node.controller_node_name}")
+            return
         self.set_controller_enable_motion(False)
 
     def stop_controller(self) -> None:
@@ -1036,15 +1046,109 @@ class BenchmarkRuntime:
         self._stop_proc("keypoint")
 
     def _set_param(self, node_name: str, param_name: str, value: str, timeout_sec: float = 6.0) -> bool:
-        rc, out = run_cmd(
-            ["ros2", "param", "set", node_name, param_name, value],
+        return self._set_param_retry(
+            node_name=node_name,
+            param_name=param_name,
+            value=value,
+            retries=4,
             timeout_sec=timeout_sec,
+            retry_wait_sec=0.35,
         )
-        if rc != 0:
+
+    def _set_param_retry(
+        self,
+        node_name: str,
+        param_name: str,
+        value: str,
+        retries: int = 3,
+        timeout_sec: float = 6.0,
+        retry_wait_sec: float = 0.3,
+    ) -> bool:
+        retries = max(1, int(retries))
+        for attempt in range(1, retries + 1):
+            rc, out = run_cmd(
+                ["ros2", "param", "set", node_name, param_name, value],
+                timeout_sec=timeout_sec,
+            )
+            if rc == 0:
+                return True
             short = out.splitlines()[-1] if out else "(no output)"
-            print(f"[param] failed {node_name}.{param_name}={value}: {short}")
+            print(
+                f"[param] failed {node_name}.{param_name}={value} "
+                f"({attempt}/{retries}): {short}"
+            )
+            if attempt < retries and retry_wait_sec > 0.0:
+                time.sleep(retry_wait_sec)
+        return False
+
+    @staticmethod
+    def _parse_ros_bool_param_get(output: str) -> Optional[bool]:
+        out = str(output).strip().lower()
+        m = re.search(r"boolean value is:\s*(true|false)", out)
+        if m:
+            return m.group(1) == "true"
+        if re.search(r"\btrue\b", out):
+            return True
+        if re.search(r"\bfalse\b", out):
             return False
-        return True
+        return None
+
+    def _set_node_param_bool(
+        self,
+        node_name: str,
+        param_name: str,
+        target_value: bool,
+        retries: int = 3,
+        timeout_sec: float = 6.0,
+        retry_wait_sec: float = 0.4,
+        skip_if_already_target: bool = False,
+    ) -> bool:
+        desired = "true" if target_value else "false"
+
+        if skip_if_already_target:
+            rc_get, out_get = run_cmd(
+                ["ros2", "param", "get", node_name, param_name],
+                timeout_sec=max(1.0, timeout_sec),
+            )
+            if rc_get == 0:
+                current = self._parse_ros_bool_param_get(out_get)
+                if current is not None and current == target_value:
+                    print(f"[param] {node_name}.{param_name} already {desired}, skip set.")
+                    return True
+
+        for attempt in range(1, max(1, int(retries)) + 1):
+            rc_set, out_set = run_cmd(
+                ["ros2", "param", "set", node_name, param_name, desired],
+                timeout_sec=timeout_sec,
+            )
+            if rc_set == 0:
+                rc_get, out_get = run_cmd(
+                    ["ros2", "param", "get", node_name, param_name],
+                    timeout_sec=max(1.0, timeout_sec),
+                )
+                if rc_get == 0:
+                    got = self._parse_ros_bool_param_get(out_get)
+                    if got is None or got == target_value:
+                        return True
+                    print(
+                        f"[param] verify mismatch {node_name}.{param_name}: got={got} "
+                        f"expected={target_value} ({attempt}/{retries})"
+                    )
+                else:
+                    short = out_get.splitlines()[-1] if out_get else "(no output)"
+                    print(
+                        f"[param] verify failed {node_name}.{param_name} "
+                        f"({attempt}/{retries}): {short}"
+                    )
+            else:
+                short = out_set.splitlines()[-1] if out_set else "(no output)"
+                print(
+                    f"[param] set failed {node_name}.{param_name}={desired} "
+                    f"({attempt}/{retries}): {short}"
+                )
+            if attempt < retries and retry_wait_sec > 0.0:
+                time.sleep(retry_wait_sec)
+        return False
 
     def is_node_running(self, node_name: str) -> bool:
         rc, out = run_cmd(["ros2", "node", "list"], timeout_sec=4.0)
@@ -1052,11 +1156,22 @@ class BenchmarkRuntime:
             return False
         return str(node_name).strip() in set(x.strip() for x in out.splitlines() if x.strip())
 
+    def wait_for_node(self, node_name: str, timeout_sec: float = 6.0) -> bool:
+        deadline = time.time() + max(0.0, float(timeout_sec))
+        while time.time() < deadline:
+            if self.is_node_running(node_name):
+                return True
+            time.sleep(0.2)
+        return self.is_node_running(node_name)
+
     def set_controller_enable_motion(self, enabled: bool) -> bool:
-        return self._set_param(
+        return self._set_param_retry(
             self.node.controller_node_name,
             "enable_motion",
             "true" if enabled else "false",
+            retries=6,
+            timeout_sec=3.5,
+            retry_wait_sec=0.35,
         )
 
     def set_local_rescue_mode(self, mode: str) -> bool:
@@ -1091,10 +1206,13 @@ class BenchmarkRuntime:
 
         ok = True
         for name, value in allow.items():
-            ok &= self._set_param(
+            ok &= self._set_param_retry(
                 self.node.controller_node_name,
                 name,
                 "true" if value else "false",
+                retries=4,
+                timeout_sec=3.0,
+                retry_wait_sec=0.25,
             )
         return ok
 
@@ -1105,11 +1223,18 @@ class BenchmarkRuntime:
                 "skip use_depth_roi set."
             )
             return False
-        return self._set_param(
+        ok = self._set_node_param_bool(
             self.node.keypoint_node_name,
             "use_depth_roi",
-            "true" if enabled else "false",
+            bool(enabled),
+            retries=3,
+            timeout_sec=6.0,
+            retry_wait_sec=0.35,
+            skip_if_already_target=True,
         )
+        if ok:
+            time.sleep(0.2)
+        return ok
 
     def set_camera_align_depth(self, enabled: bool) -> bool:
         if not self.is_node_running(self.node.camera_node_name):
@@ -1118,18 +1243,32 @@ class BenchmarkRuntime:
                 "skip align_depth set."
             )
             return False
-        return self._set_param(
+        ok = self._set_node_param_bool(
             self.node.camera_node_name,
             "align_depth.enable",
-            "true" if enabled else "false",
+            bool(enabled),
+            retries=3,
+            timeout_sec=6.0,
+            retry_wait_sec=0.5,
+            skip_if_already_target=True,
         )
+        if ok:
+            time.sleep(0.25)
+        return ok
 
     def set_controller_feature_source(self, source: str) -> bool:
         src = str(source).strip().lower()
         if src not in ("raw", "filtered"):
             print(f"[controller] invalid feature_source: {src}")
             return False
-        return self._set_param(self.node.controller_node_name, "feature_source", src)
+        return self._set_param_retry(
+            self.node.controller_node_name,
+            "feature_source",
+            src,
+            retries=4,
+            timeout_sec=3.0,
+            retry_wait_sec=0.25,
+        )
 
     def call_start_capture_service(self) -> bool:
         rc, out = run_cmd(
@@ -1311,13 +1450,17 @@ def execute_manual_benchmark(
     runtime.set_local_rescue_mode("off")
     runtime.stop_filter()
     runtime.stop_tracking()
-    runtime.set_camera_align_depth(True)
+    if not runtime.set_camera_align_depth(True):
+        print("[manual] could not set camera align_depth.enable=true. abort.")
+        return
 
     if not node.move_to("goal_for_initialization", node.saved.goal):
         print("[manual] could not reach goal pose for initialization. abort.")
         return
 
-    runtime.set_keypoint_use_depth_roi(True)
+    if not runtime.set_keypoint_use_depth_roi(True):
+        print("[manual] could not set keypoint use_depth_roi=true. abort.")
+        return
     if not runtime.call_start_capture_service():
         print("[manual] initialization service failed. abort.")
         return
@@ -1327,9 +1470,11 @@ def execute_manual_benchmark(
         return
 
     runtime.start_tracking()
-    runtime.set_keypoint_use_depth_roi(False)
+    if not runtime.set_keypoint_use_depth_roi(False):
+        print("[manual] warning: could not set keypoint use_depth_roi=false for tracking.")
     if not node.tracking_keep_aligned_depth:
-        runtime.set_camera_align_depth(False)
+        if not runtime.set_camera_align_depth(False):
+            print("[manual] warning: could not set camera align_depth.enable=false after init.")
     if not node.move_to("start_before_runs", node.saved.start):
         print("[manual] could not reach start pose before runs. abort.")
         return
@@ -1374,10 +1519,74 @@ def execute_manual_benchmark(
         )
 
         runtime.start_controller()
+        if not runtime.wait_for_node(node.controller_node_name, timeout_sec=6.0):
+            print("[manual] controller node did not become ready. abort remaining runs.")
+            node.run_goal_reached = False
+            node.run_timed_out = True
+            summary = node.stop_run_csv()
+            print(
+                "[manual] run done "
+                f"goal_reached={summary['run_goal_reached']} "
+                f"timed_out={summary['run_timed_out']} "
+                f"filter_rejects={summary['filter_reject_count']} "
+                f"lr_attempts={summary['local_rescue_attempts_delta']} "
+                f"lr_success={summary['local_rescue_success_delta']} "
+                f"lr_reject={summary['local_rescue_reject_delta']} "
+                f"csv={csv_path}"
+            )
+            break
         _sleep_with_spin(node, 0.8)
-        runtime.set_controller_level(level_choice)
-        runtime.set_controller_feature_source("raw" if stage_choice == "1" else "filtered")
-        runtime.set_controller_enable_motion(True)
+        if not runtime.set_controller_level(level_choice):
+            print("[manual] failed to set controller level flags. abort remaining runs.")
+            node.run_goal_reached = False
+            node.run_timed_out = True
+            runtime.stop_controller()
+            summary = node.stop_run_csv()
+            print(
+                "[manual] run done "
+                f"goal_reached={summary['run_goal_reached']} "
+                f"timed_out={summary['run_timed_out']} "
+                f"filter_rejects={summary['filter_reject_count']} "
+                f"lr_attempts={summary['local_rescue_attempts_delta']} "
+                f"lr_success={summary['local_rescue_success_delta']} "
+                f"lr_reject={summary['local_rescue_reject_delta']} "
+                f"csv={csv_path}"
+            )
+            break
+        if not runtime.set_controller_feature_source("raw" if stage_choice == "1" else "filtered"):
+            print("[manual] failed to set controller feature_source. abort remaining runs.")
+            node.run_goal_reached = False
+            node.run_timed_out = True
+            runtime.stop_controller()
+            summary = node.stop_run_csv()
+            print(
+                "[manual] run done "
+                f"goal_reached={summary['run_goal_reached']} "
+                f"timed_out={summary['run_timed_out']} "
+                f"filter_rejects={summary['filter_reject_count']} "
+                f"lr_attempts={summary['local_rescue_attempts_delta']} "
+                f"lr_success={summary['local_rescue_success_delta']} "
+                f"lr_reject={summary['local_rescue_reject_delta']} "
+                f"csv={csv_path}"
+            )
+            break
+        if not runtime.set_controller_enable_motion(True):
+            print("[manual] failed to enable controller motion. abort remaining runs.")
+            node.run_goal_reached = False
+            node.run_timed_out = True
+            runtime.stop_controller()
+            summary = node.stop_run_csv()
+            print(
+                "[manual] run done "
+                f"goal_reached={summary['run_goal_reached']} "
+                f"timed_out={summary['run_timed_out']} "
+                f"filter_rejects={summary['filter_reject_count']} "
+                f"lr_attempts={summary['local_rescue_attempts_delta']} "
+                f"lr_success={summary['local_rescue_success_delta']} "
+                f"lr_reject={summary['local_rescue_reject_delta']} "
+                f"csv={csv_path}"
+            )
+            break
         start_wait = time.time()
         reached = False
         while rclpy.ok() and (time.time() - start_wait) <= node.benchmark_timeout_sec:

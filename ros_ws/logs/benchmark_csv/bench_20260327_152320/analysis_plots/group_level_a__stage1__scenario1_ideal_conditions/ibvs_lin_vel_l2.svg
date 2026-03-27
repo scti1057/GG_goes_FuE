@@ -3,29 +3,25 @@
 <text x='640.0' y='28' text-anchor='middle' font-size='22'>level_a | stage1 | scenario1_ideal_conditions | ibvs_lin_vel_l2</text>
 <rect x='85' y='55' width='1155' height='625' fill='none' stroke='#333' stroke-width='1.2'/>
 <line x1='85.00' y1='680.00' x2='85.00' y2='686.00' stroke='#333'/>
-<text x='85.00' y='704.00' text-anchor='middle' font-size='12'>0.00</text>
-<line x1='316.00' y1='680.00' x2='316.00' y2='686.00' stroke='#333'/>
-<text x='316.00' y='704.00' text-anchor='middle' font-size='12'>3.92</text>
-<line x1='547.00' y1='680.00' x2='547.00' y2='686.00' stroke='#333'/>
-<text x='547.00' y='704.00' text-anchor='middle' font-size='12'>7.83</text>
-<line x1='778.00' y1='680.00' x2='778.00' y2='686.00' stroke='#333'/>
-<text x='778.00' y='704.00' text-anchor='middle' font-size='12'>11.75</text>
-<line x1='1009.00' y1='680.00' x2='1009.00' y2='686.00' stroke='#333'/>
-<text x='1009.00' y='704.00' text-anchor='middle' font-size='12'>15.67</text>
-<line x1='1240.00' y1='680.00' x2='1240.00' y2='686.00' stroke='#333'/>
-<text x='1240.00' y='704.00' text-anchor='middle' font-size='12'>19.58</text>
+<text x='85.00' y='704.00' text-anchor='middle' font-size='12'>0</text>
+<line x1='379.88' y1='680.00' x2='379.88' y2='686.00' stroke='#333'/>
+<text x='379.88' y='704.00' text-anchor='middle' font-size='12'>5</text>
+<line x1='674.77' y1='680.00' x2='674.77' y2='686.00' stroke='#333'/>
+<text x='674.77' y='704.00' text-anchor='middle' font-size='12'>10</text>
+<line x1='969.65' y1='680.00' x2='969.65' y2='686.00' stroke='#333'/>
+<text x='969.65' y='704.00' text-anchor='middle' font-size='12'>15</text>
+<line x1='1264.54' y1='680.00' x2='1264.54' y2='686.00' stroke='#333'/>
+<text x='1264.54' y='704.00' text-anchor='middle' font-size='12'>20</text>
 <line x1='79.00' y1='680.00' x2='85.00' y2='680.00' stroke='#333'/>
 <text x='75.00' y='684.00' text-anchor='end' font-size='12'>0</text>
-<line x1='79.00' y1='555.00' x2='85.00' y2='555.00' stroke='#333'/>
-<text x='75.00' y='559.00' text-anchor='end' font-size='12'>0.00359</text>
-<line x1='79.00' y1='430.00' x2='85.00' y2='430.00' stroke='#333'/>
-<text x='75.00' y='434.00' text-anchor='end' font-size='12'>0.00719</text>
-<line x1='79.00' y1='305.00' x2='85.00' y2='305.00' stroke='#333'/>
-<text x='75.00' y='309.00' text-anchor='end' font-size='12'>0.0108</text>
-<line x1='79.00' y1='180.00' x2='85.00' y2='180.00' stroke='#333'/>
-<text x='75.00' y='184.00' text-anchor='end' font-size='12'>0.0144</text>
-<line x1='79.00' y1='55.00' x2='85.00' y2='55.00' stroke='#333'/>
-<text x='75.00' y='59.00' text-anchor='end' font-size='12'>0.018</text>
+<line x1='79.00' y1='506.07' x2='85.00' y2='506.07' stroke='#333'/>
+<text x='75.00' y='510.07' text-anchor='end' font-size='12'>0.005</text>
+<line x1='79.00' y1='332.14' x2='85.00' y2='332.14' stroke='#333'/>
+<text x='75.00' y='336.14' text-anchor='end' font-size='12'>0.01</text>
+<line x1='79.00' y1='158.22' x2='85.00' y2='158.22' stroke='#333'/>
+<text x='75.00' y='162.22' text-anchor='end' font-size='12'>0.015</text>
+<line x1='79.00' y1='-15.71' x2='85.00' y2='-15.71' stroke='#333'/>
+<text x='75.00' y='-11.71' text-anchor='end' font-size='12'>0.02</text>
 <polyline points='85.00,56.75 105.87,59.20 126.77,65.53 147.73,75.91 168.66,109.81 189.59,137.54 210.60,163.30 231.54,184.00 252.43,198.85 273.34,211.60 294.29,221.18 315.22,230.29 336.35,236.38 358.00,241.18 379.02,245.39 399.96,248.40 420.84,251.47 441.76,253.70 463.14,255.42 484.09,283.96 504.98,325.93 525.92,366.60 546.80,400.14 567.75,428.29 588.63,445.84 609.51,466.07 630.42,485.75 651.38,506.43 672.44,526.25 693.59,538.46 714.59,548.45 735.56,560.65 756.53,571.39 777.46,579.82 798.43,589.53 819.32,597.51 840.26,606.86 861.35,615.00 882.28,620.35 903.22,626.35 924.13,628.97 945.39,632.97 966.39,638.39 987.61,641.67 1008.55,639.37 1029.45,645.99 1050.33,649.46 1071.25,649.48 1092.13,654.94 1113.03,655.60 1133.94,660.00 1154.84,660.59 1175.72,662.63 1196.62,664.51 1217.52,665.83' fill='none' stroke='#1f77b4' stroke-width='1.5' opacity='0.72'/>
 <line x1='1030' y1='71' x2='1052' y2='71' stroke='#1f77b4' stroke-width='2.4'/>
 <text x='1058' y='75' font-size='12'>run01</text>
