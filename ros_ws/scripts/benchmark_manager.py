@@ -37,9 +37,101 @@ STAGE_KEYPOINT = "stage_1_keypoint_only"
 STAGE_FILTER = "stage_2_filter"
 STAGE_FILTER_LR = "stage_3_filter_local_rescue"
 
+CONTROLLER_SPEED_PROFILES: dict[str, dict[str, Any]] = {
+    "slow": {
+        "label": "slow",
+        "params": {
+            "lambda_gain": 0.22,
+            "max_linear_speed": 0.012,
+            "max_angular_speed": 0.08,
+            "smooth_cmd_enable": True,
+            "smooth_cmd_use_median": True,
+            "smooth_cmd_median_window": 3,
+            "smooth_cmd_ema_alpha": 0.35,
+            "smooth_cmd_max_linear_accel": 0.08,
+            "smooth_cmd_max_angular_accel": 0.70,
+        },
+    },
+    "mid": {
+        "label": "mid",
+        "params": {
+            "lambda_gain": 0.28,
+            "max_linear_speed": 0.018,
+            "max_angular_speed": 0.12,
+            "smooth_cmd_enable": True,
+            "smooth_cmd_use_median": True,
+            "smooth_cmd_median_window": 3,
+            "smooth_cmd_ema_alpha": 0.45,
+            "smooth_cmd_max_linear_accel": 0.12,
+            "smooth_cmd_max_angular_accel": 1.00,
+        },
+    },
+    "fast": {
+        "label": "fast",
+        "params": {
+            "lambda_gain": 0.34,
+            "max_linear_speed": 0.024,
+            "max_angular_speed": 0.18,
+            "smooth_cmd_enable": True,
+            "smooth_cmd_use_median": False,
+            "smooth_cmd_median_window": 1,
+            "smooth_cmd_ema_alpha": 0.60,
+            "smooth_cmd_max_linear_accel": 0.20,
+            "smooth_cmd_max_angular_accel": 1.60,
+        },
+    },
+    "fast_plus": {
+        "label": "fast_plus",
+        "params": {
+            "lambda_gain": 0.40,
+            "max_linear_speed": 0.030,
+            "max_angular_speed": 0.24,
+            "smooth_cmd_enable": True,
+            "smooth_cmd_use_median": False,
+            "smooth_cmd_median_window": 1,
+            "smooth_cmd_ema_alpha": 0.72,
+            "smooth_cmd_max_linear_accel": 0.30,
+            "smooth_cmd_max_angular_accel": 2.20,
+        },
+    },
+    "max": {
+        "label": "max",
+        "params": {
+            "lambda_gain": 0.46,
+            "max_linear_speed": 0.036,
+            "max_angular_speed": 0.30,
+            "smooth_cmd_enable": True,
+            "smooth_cmd_use_median": False,
+            "smooth_cmd_median_window": 1,
+            "smooth_cmd_ema_alpha": 0.82,
+            "smooth_cmd_max_linear_accel": 0.45,
+            "smooth_cmd_max_angular_accel": 3.00,
+        },
+    },
+}
+
+
+def normalize_speed_profile_name(value: Any) -> str:
+    raw = str(value).strip().lower()
+    if raw in CONTROLLER_SPEED_PROFILES:
+        return raw
+    if raw == "1":
+        return "slow"
+    if raw == "2":
+        return "mid"
+    if raw == "3":
+        return "fast"
+    if raw == "4":
+        return "fast_plus"
+    if raw == "5":
+        return "max"
+    return "slow"
+
+
 DEFAULTS: dict[str, Any] = {
     "pose_topic": "/tcp_pose_broadcaster/pose",
     "cmd_vel_topic": "/cartesian_twist_passthrough_controller/cmd_vel",
+    "controller_speed_profile": "slow",
     "linear_kp": 1.2,
     "max_linear_speed": 0.03,
     "angular_kp": 1.4,
@@ -347,6 +439,7 @@ class BenchmarkManagerNode(Node):
         self.log_root = log_root
         self.pose_topic = args.pose_topic
         self.cmd_vel_topic = args.cmd_vel_topic
+        self.controller_speed_profile = normalize_speed_profile_name(args.controller_speed_profile)
 
         self.linear_kp = float(args.linear_kp)
         self.max_linear_speed = float(args.max_linear_speed)
@@ -706,6 +799,7 @@ class BenchmarkManagerNode(Node):
             "log_root": str(self.log_root),
             "pose_topic": self.pose_topic,
             "cmd_vel_topic": self.cmd_vel_topic,
+            "controller_speed_profile": self.controller_speed_profile,
             "linear_kp": float(self.linear_kp),
             "max_linear_speed": float(self.max_linear_speed),
             "angular_kp": float(self.angular_kp),
@@ -960,10 +1054,26 @@ class BenchmarkRuntime:
             return ["allow_wx", "allow_wy"]
         return []
 
+    @staticmethod
+    def _ros_param_text(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, float):
+            txt = format(float(value), ".15g")
+            if ("." not in txt) and ("e" not in txt) and ("E" not in txt):
+                txt += ".0"
+            return txt
+        return str(value)
+
+    def _controller_speed_params(self) -> dict[str, Any]:
+        key = normalize_speed_profile_name(self.node.controller_speed_profile)
+        return dict(CONTROLLER_SPEED_PROFILES[key]["params"])
+
     def _make_controller_cmd(self, level: str, feature_source: str) -> list[str]:
         src = str(feature_source).strip().lower()
         if src not in ("raw", "filtered"):
             src = "filtered"
+        speed_params = self._controller_speed_params()
         cmd = [
             "ros2",
             "run",
@@ -977,6 +1087,8 @@ class BenchmarkRuntime:
             "-p",
             f"feature_source:={src}",
         ]
+        for pname, pvalue in speed_params.items():
+            cmd += ["-p", f"{pname}:={self._ros_param_text(pvalue)}"]
         for dof_param in self._false_dofs_for_level(level):
             cmd += ["-p", f"{dof_param}:=false"]
         return cmd
@@ -1352,7 +1464,8 @@ def print_menu() -> None:
     print("  1) Set/Drive positions")
     print("  2) Manual benchmarking")
     print("  3) Automated benchmarking (later)")
-    print("  4) Show status")
+    print("  4) Set controller speed")
+    print("  5) Show status")
     print("  q) Quit")
 
 
@@ -1376,6 +1489,37 @@ def print_status(node: BenchmarkManagerNode, session_dir: Path) -> None:
     print(f"- runs_n:      {node.benchmark_repetitions}")
     print(f"- run_timeout: {node.benchmark_timeout_sec:.1f}s")
     print(f"- pre_wait:    {node.benchmark_pre_run_wait_sec:.1f}s")
+    sp = normalize_speed_profile_name(node.controller_speed_profile)
+    print(f"- ctrl_speed:  {sp}")
+
+
+def controller_speed_menu(node: BenchmarkManagerNode) -> None:
+    while True:
+        current = normalize_speed_profile_name(node.controller_speed_profile)
+        print("\nController speed profile")
+        print(f"  current: {current}")
+        print("  1) slow")
+        print("  2) mid")
+        print("  3) fast")
+        print("  4) fast_plus")
+        print("  5) max")
+        print("  b) Back")
+        choice = input("speed> ").strip().lower()
+        if choice == "b":
+            return
+        target = {
+            "1": "slow",
+            "2": "mid",
+            "3": "fast",
+            "4": "fast_plus",
+            "5": "max",
+        }.get(choice)
+        if target is None:
+            print("unknown input.")
+            continue
+        node.controller_speed_profile = target
+        node.persist_config()
+        print(f"[speed] controller profile set to: {target} (saved)")
 
 
 def positions_submenu(node: BenchmarkManagerNode, runtime: BenchmarkRuntime) -> None:
@@ -1750,6 +1894,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pose-topic", default=None)
     p.add_argument("--cmd-vel-topic", default=None)
     p.add_argument("--log-root", type=Path, default=None)
+    p.add_argument("--controller-speed-profile", default=None)
     p.add_argument("--linear-kp", type=float, default=None)
     p.add_argument("--max-linear-speed", type=float, default=None)
     p.add_argument("--angular-kp", type=float, default=None)
@@ -1825,6 +1970,7 @@ def resolve_effective_settings(cli: argparse.Namespace) -> tuple[argparse.Namesp
         "pose_topic": cli.pose_topic,
         "cmd_vel_topic": cli.cmd_vel_topic,
         "log_root": str(cli.log_root) if cli.log_root is not None else None,
+        "controller_speed_profile": cli.controller_speed_profile,
         "linear_kp": cli.linear_kp,
         "max_linear_speed": cli.max_linear_speed,
         "angular_kp": cli.angular_kp,
@@ -1886,6 +2032,7 @@ def resolve_effective_settings(cli: argparse.Namespace) -> tuple[argparse.Namesp
         pose_topic=str(merged["pose_topic"]),
         cmd_vel_topic=str(merged["cmd_vel_topic"]),
         log_root=Path(str(merged["log_root"])),
+        controller_speed_profile=normalize_speed_profile_name(merged.get("controller_speed_profile", "slow")),
         linear_kp=float(merged["linear_kp"]),
         max_linear_speed=float(merged["max_linear_speed"]),
         angular_kp=float(merged["angular_kp"]),
@@ -1988,6 +2135,8 @@ def main() -> int:
             elif choice == "3":
                 print("[auto] automated benchmarking menu is not implemented yet.")
             elif choice == "4":
+                controller_speed_menu(node)
+            elif choice == "5":
                 print_status(node, session_dir)
             elif choice == "q":
                 break

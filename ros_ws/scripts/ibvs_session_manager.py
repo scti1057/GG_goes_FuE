@@ -1163,17 +1163,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--filter-param-timeout", type=float, default=6.0)
     parser.add_argument("--filter-type", default="ekf")
     parser.add_argument("--filter-q-noise", type=float, default=2.0)
-    parser.add_argument("--filter-r-noise", type=float, default=1.1)
-    parser.add_argument("--filter-gate-threshold", type=float, default=20.0)
+    parser.add_argument("--filter-r-noise", type=float, default=1.5)
+    parser.add_argument("--filter-gate-threshold", type=float, default=40.0)
     parser.add_argument("--filter-z-depth", type=float, default=0.25)
-    parser.add_argument("--filter-predict-rate", type=float, default=120.0)
+    parser.add_argument("--filter-predict-rate", type=float, default=30.0)
     parser.add_argument(
         "--filter-camera-velocity-topic",
         default="/cartesian_twist_passthrough_controller/cmd_vel",
     )
     parser.add_argument("--filter-max-active-keypoints", type=int, default=30)
     parser.add_argument("--filter-min-init-keypoints", type=int, default=8)
-    parser.add_argument("--filter-min-update-keypoints", type=int, default=1)
+    parser.add_argument("--filter-min-update-keypoints", type=int, default=10)
 
     parser.add_argument("--camera-node", default="/camera/camera")
     parser.add_argument("--camera-param-timeout", type=float, default=6.0)
