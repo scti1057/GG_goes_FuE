@@ -7,12 +7,13 @@
   "cmd_vel_topic": "/cartesian_twist_passthrough_controller/cmd_vel",
   "control_rate_hz": 30.0,
   "controller_node_name": "/ibvs_twist_controller_node",
+  "controller_speed_profile": "mid",
   "default_filter_type": "ekf",
   "detector_device": "cuda",
   "detector_top_k": 1024,
   "detector_type": "xfeat",
   "filter_camera_velocity_topic": "/cartesian_twist_passthrough_controller/cmd_vel",
-  "filter_gate_threshold": 3.0,
+  "filter_gate_threshold": 9.0,
   "filter_max_active_keypoints": 30,
   "filter_min_init_keypoints": 8,
   "filter_min_update_keypoints": 10,
@@ -21,18 +22,18 @@
   "filter_q_noise": 2.0,
   "filter_r_noise": 1.5,
   "filter_z_depth": 0.25,
-  "goal_hold_sec": 0.5,
+  "goal_hold_sec": 0.1,
   "goal_pose": {
     "quat_xyzw": [
-      -0.03212693238149823,
-      0.9994837967751972,
-      -1.3872452312171372e-05,
-      2.673253367171708e-06
+      0.02591931626929946,
+      -0.9996640379816338,
+      1.4486664620884767e-05,
+      7.23282164000301e-07
     ],
     "xyz": [
-      0.017816422439204307,
-      -0.44501480582820563,
-      0.3398384582306232
+      0.03227941098617231,
+      -0.6617030119486196,
+      0.36675872958597977
     ]
   },
   "goal_reached_topic": "/ibvs/control/goal_reached",
@@ -61,15 +62,15 @@
   "reference_topic": "/ibvs/reference/keypoints",
   "start_pose": {
     "quat_xyzw": [
-      -0.1962669803747257,
-      0.9805504945374062,
-      -4.419350966778277e-06,
-      7.583183216463774e-06
+      -0.02592784061732941,
+      0.9996638163729321,
+      3.621548528126455e-05,
+      2.0163699408536602e-06
     ],
     "xyz": [
-      -0.041791949172581534,
-      -0.41031474362856757,
-      0.46292773877000437
+      0.12528020100661835,
+      -0.5062273432730477,
+      0.46303997803926905
     ]
   },
   "tracking_keep_aligned_depth": true,

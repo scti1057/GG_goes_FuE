@@ -1620,9 +1620,7 @@ def execute_manual_benchmark(
     runtime.set_local_rescue_mode("off")
     runtime.stop_filter()
     runtime.stop_tracking()
-    if not runtime.set_camera_align_depth(True):
-        print("[manual] could not set camera align_depth.enable=true. abort.")
-        return
+    print("[manual] camera align_depth untouched (using driver default).")
 
     if not node.move_to("goal_for_initialization", node.saved.goal):
         print("[manual] could not reach goal pose for initialization. abort.")
@@ -1642,9 +1640,6 @@ def execute_manual_benchmark(
     runtime.start_tracking()
     if not runtime.set_keypoint_use_depth_roi(False):
         print("[manual] warning: could not set keypoint use_depth_roi=false for tracking.")
-    if not node.tracking_keep_aligned_depth:
-        if not runtime.set_camera_align_depth(False):
-            print("[manual] warning: could not set camera align_depth.enable=false after init.")
     if not node.move_to("start_before_runs", node.saved.start):
         print("[manual] could not reach start pose before runs. abort.")
         return
