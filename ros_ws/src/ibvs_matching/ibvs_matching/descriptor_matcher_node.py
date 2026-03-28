@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float32, String, UInt32
 
 from ibvs_msgs.msg import (
@@ -108,6 +108,8 @@ class DescriptorMatcherNode(Node):
         self.latest_filtered_xy = np.zeros((0, 2), dtype=np.float32)
         self.latest_filtered_sigma_px = np.zeros((0,), dtype=np.float32)
         self.latest_filtered_time_sec = -1.0
+        self.last_filtered_msg_stamp_sec = -1.0
+        self.last_keypoints_msg_stamp_sec = -1.0
         self.latest_filter_trace = 0.0
 
         self.total_rescue_attempts = 0
@@ -123,35 +125,39 @@ class DescriptorMatcherNode(Node):
         filtered_topic = str(self.get_parameter("filtered_matches_topic").value)
         filter_unc_topic = str(self.get_parameter("filter_uncertainty_topic").value)
 
-        from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-
         ref_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        realtime_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         self.sub_ref = self.create_subscription(Keypoints, ref_topic, self.on_reference, ref_qos)
         self.sub_kp = self.create_subscription(
             Keypoints,
             kp_topic,
             self.on_keypoints,
-            qos_profile_sensor_data,
+            realtime_qos,
         )
         self.sub_filtered = self.create_subscription(
             Matches,
             filtered_topic,
             self.on_filtered_matches,
-            qos_profile_sensor_data,
+            realtime_qos,
         )
         self.sub_filter_unc = self.create_subscription(
             Float32,
             filter_unc_topic,
             self.on_filter_uncertainty,
-            qos_profile_sensor_data,
+            realtime_qos,
         )
 
-        self.pub = self.create_publisher(Matches, out_topic, 10)
+        self.pub = self.create_publisher(Matches, out_topic, realtime_qos)
 
         self.pub_stats = None
         self.pub_attempts = None
@@ -205,6 +211,10 @@ class DescriptorMatcherNode(Node):
 
     def _now_sec(self) -> float:
         return float(self.get_clock().now().nanoseconds) * 1e-9
+
+    @staticmethod
+    def _stamp_to_sec(stamp) -> float:
+        return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
     @staticmethod
     def _parse_mode(raw: str) -> str:
@@ -517,11 +527,19 @@ class DescriptorMatcherNode(Node):
         self.get_logger().info(f"Reference cached: K={k.shape[0]} D={d}")
 
     def on_filtered_matches(self, msg: Matches):
+        stamp_sec = self._stamp_to_sec(msg.header.stamp)
+        if np.isfinite(stamp_sec) and stamp_sec > 0.0:
+            if self.last_filtered_msg_stamp_sec > 0.0 and stamp_sec <= self.last_filtered_msg_stamp_sec:
+                return
+            self.last_filtered_msg_stamp_sec = stamp_sec
         ref_ids, cur_xy, sigma = self._parse_matches(msg)
         self.latest_filtered_ref_ids = ref_ids
         self.latest_filtered_xy = cur_xy
         self.latest_filtered_sigma_px = sigma
-        self.latest_filtered_time_sec = self._now_sec()
+        if np.isfinite(stamp_sec) and stamp_sec > 0.0:
+            self.latest_filtered_time_sec = stamp_sec
+        else:
+            self.latest_filtered_time_sec = self._now_sec()
 
     def on_filter_uncertainty(self, msg: Float32):
         self.latest_filter_trace = float(msg.data)
@@ -789,6 +807,12 @@ class DescriptorMatcherNode(Node):
         self.pub_rejects.publish(m_reject)
 
     def on_keypoints(self, msg: Keypoints):
+        stamp_sec = self._stamp_to_sec(msg.header.stamp)
+        if np.isfinite(stamp_sec) and stamp_sec > 0.0:
+            if self.last_keypoints_msg_stamp_sec > 0.0 and stamp_sec <= self.last_keypoints_msg_stamp_sec:
+                return
+            self.last_keypoints_msg_stamp_sec = stamp_sec
+
         if self.ref_desc is None:
             return
 

@@ -64,32 +64,39 @@ public:
 
     rclcpp::SubscriptionOptions sub_options;
     sub_options.callback_group = cb_group_;
+    auto sensor_qos = rclcpp::SensorDataQoS();
+    sensor_qos.keep_last(1);
+    const auto reliable_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
+    const auto ref_qos =
+      rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
 
     sub_cam_info_ = create_subscription<sensor_msgs::msg::CameraInfo>(
       "/camera/camera/color/camera_info",
-      10,
+      sensor_qos,
       std::bind(&FilterNode::camInfoCallback, this, std::placeholders::_1),
       sub_options);
 
     sub_ref_ = create_subscription<ibvs_msgs::msg::Keypoints>(
       "/ibvs/reference/keypoints",
-      10,
+      ref_qos,
       std::bind(&FilterNode::referenceCallback, this, std::placeholders::_1),
       sub_options);
 
     sub_camera_velocity_ = create_subscription<geometry_msgs::msg::Twist>(
       camera_velocity_topic_,
-      10,
+      reliable_qos,
       std::bind(&FilterNode::cameraVelocityCallback, this, std::placeholders::_1),
       sub_options);
 
     sub_matches_ = create_subscription<ibvs_msgs::msg::Matches>(
       "/ibvs/matches",
-      10,
+      sensor_qos,
       std::bind(&FilterNode::matchesCallback, this, std::placeholders::_1),
       sub_options);
 
-    pub_filtered_points_ = create_publisher<ibvs_msgs::msg::Matches>("/ibvs/filtered_features", 10);
+    pub_filtered_points_ = create_publisher<ibvs_msgs::msg::Matches>(
+      "/ibvs/filtered_features",
+      sensor_qos);
     pub_filter_status_ = create_publisher<std_msgs::msg::String>(filter_status_topic_, 10);
     pub_filter_uncertainty_ = create_publisher<std_msgs::msg::Float32>(filter_uncertainty_topic_, 10);
     pub_filter_update_status_ =
@@ -1040,6 +1047,15 @@ private:
       return;
     }
 
+    if (matches_msg->header.stamp.sec != 0 || matches_msg->header.stamp.nanosec != 0) {
+      const rclcpp::Time stamp(matches_msg->header.stamp);
+      if (has_last_matches_msg_stamp_ && stamp <= last_matches_msg_stamp_) {
+        return;
+      }
+      last_matches_msg_stamp_ = stamp;
+      has_last_matches_msg_stamp_ = true;
+    }
+
     if (debug_predict_only_.load()) {
       last_update_status_ = "PREDICT_ONLY (UPDATES DISABLED)";
       return;
@@ -1200,6 +1216,8 @@ private:
   std::unordered_map<int64_t, float> predicted_depth_by_ref_;
   uint64_t depth_measurement_epoch_ = 0;
   uint64_t depth_measurement_consumed_epoch_ = 0;
+  rclcpp::Time last_matches_msg_stamp_;
+  bool has_last_matches_msg_stamp_ = false;
 
   uint32_t update_step_count_;
   uint32_t update_success_count_;

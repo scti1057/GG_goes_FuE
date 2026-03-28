@@ -12,7 +12,6 @@ from rclpy.qos import (
     HistoryPolicy,
     QoSProfile,
     ReliabilityPolicy,
-    qos_profile_sensor_data,
 )
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -116,11 +115,13 @@ class IbvsTwistControllerNode(Node):
         self.last_raw_cur_xy: Optional[np.ndarray] = None
         self.last_raw_depth_m: Optional[np.ndarray] = None
         self.last_raw_time_sec: float = -1.0
+        self.last_raw_msg_stamp_sec: float = -1.0
 
         self.last_filtered_ref_id: Optional[np.ndarray] = None
         self.last_filtered_cur_xy: Optional[np.ndarray] = None
         self.last_filtered_depth_m: Optional[np.ndarray] = None
         self.last_filtered_time_sec: float = -1.0
+        self.last_filtered_msg_stamp_sec: float = -1.0
 
         self.init_done: bool = False
         self.goal_reached: bool = False
@@ -154,6 +155,18 @@ class IbvsTwistControllerNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        realtime_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        cmd_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
 
         self.sub_ref = self.create_subscription(
             Keypoints,
@@ -165,13 +178,13 @@ class IbvsTwistControllerNode(Node):
             Matches,
             self.get_parameter('raw_matches_topic').value,
             self.on_raw_matches,
-            qos_profile_sensor_data,
+            realtime_qos,
         )
         self.sub_filtered_matches = self.create_subscription(
             Matches,
             self.get_parameter('filtered_matches_topic').value,
             self.on_filtered_matches,
-            qos_profile_sensor_data,
+            realtime_qos,
         )
         self.sub_init_done = self.create_subscription(
             Bool,
@@ -183,7 +196,7 @@ class IbvsTwistControllerNode(Node):
         self.twist_pub = self.create_publisher(
             Twist,
             self.get_parameter('twist_topic').value,
-            10,
+            cmd_qos,
         )
         self.goal_pub = self.create_publisher(
             Bool,
@@ -234,6 +247,10 @@ class IbvsTwistControllerNode(Node):
 
     def now_sec(self) -> float:
         return float(self.get_clock().now().nanoseconds) * 1e-9
+
+    @staticmethod
+    def _stamp_to_sec(stamp) -> float:
+        return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
     def _base_frame(self) -> str:
         return str(self.get_parameter('base_frame').value)
@@ -367,22 +384,40 @@ class IbvsTwistControllerNode(Node):
         return ref_id[valid], cur_xy[valid], depth_m[valid]
 
     def on_raw_matches(self, msg: Matches):
+        stamp_sec = self._stamp_to_sec(msg.header.stamp)
+        if np.isfinite(stamp_sec) and stamp_sec > 0.0:
+            if self.last_raw_msg_stamp_sec > 0.0 and stamp_sec <= self.last_raw_msg_stamp_sec:
+                return
+            self.last_raw_msg_stamp_sec = stamp_sec
+
         ref_id, cur_xy, depth_m = self._cache_matches(msg)
         if ref_id is None:
             return
         self.last_raw_ref_id = ref_id
         self.last_raw_cur_xy = cur_xy
         self.last_raw_depth_m = depth_m
-        self.last_raw_time_sec = self.now_sec()
+        if np.isfinite(stamp_sec) and stamp_sec > 0.0:
+            self.last_raw_time_sec = stamp_sec
+        else:
+            self.last_raw_time_sec = self.now_sec()
 
     def on_filtered_matches(self, msg: Matches):
+        stamp_sec = self._stamp_to_sec(msg.header.stamp)
+        if np.isfinite(stamp_sec) and stamp_sec > 0.0:
+            if self.last_filtered_msg_stamp_sec > 0.0 and stamp_sec <= self.last_filtered_msg_stamp_sec:
+                return
+            self.last_filtered_msg_stamp_sec = stamp_sec
+
         ref_id, cur_xy, depth_m = self._cache_matches(msg)
         if ref_id is None:
             return
         self.last_filtered_ref_id = ref_id
         self.last_filtered_cur_xy = cur_xy
         self.last_filtered_depth_m = depth_m
-        self.last_filtered_time_sec = self.now_sec()
+        if np.isfinite(stamp_sec) and stamp_sec > 0.0:
+            self.last_filtered_time_sec = stamp_sec
+        else:
+            self.last_filtered_time_sec = self.now_sec()
 
     def _active_mask(self) -> np.ndarray:
         return np.array([

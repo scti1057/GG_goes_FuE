@@ -10,7 +10,6 @@ from rclpy.qos import (
     HistoryPolicy,
     QoSProfile,
     ReliabilityPolicy,
-    qos_profile_sensor_data,
 )
 from sensor_msgs.msg import CompressedImage, Image
 from typing import Any
@@ -55,6 +54,8 @@ class KeypointNode(Node):
         self.latest_near_mask = None  # type: np.ndarray | None
         self.latest_depth_raw = None  # type: np.ndarray | None
         self.latest_depth_stamp_sec = -1.0
+        self.last_color_msg_stamp_sec = -1.0
+        self.last_depth_msg_stamp_sec = -1.0
 
         self.debug_mode = bool(self.get_parameter('debug_mode').value)
         self.use_depth_roi = bool(self.get_parameter('use_depth_roi').value)
@@ -91,17 +92,23 @@ class KeypointNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
         )
+        realtime_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
 
-        self.kp_pub = self.create_publisher(Keypoints, kp_topic, 10)
+        self.kp_pub = self.create_publisher(Keypoints, kp_topic, realtime_qos)
         self.color_topic_uses_compressed = self._topic_uses_compressed(in_topic)
         self.depth_topic_uses_compressed = self._topic_uses_compressed(depth_topic)
         color_msg_type = CompressedImage if self.color_topic_uses_compressed else Image
         depth_msg_type = CompressedImage if self.depth_topic_uses_compressed else Image
         self.sub_color = self.create_subscription(
-            color_msg_type, in_topic, self.on_color, qos_profile_sensor_data
+            color_msg_type, in_topic, self.on_color, realtime_qos
         )
         self.sub_depth = self.create_subscription(
-            depth_msg_type, depth_topic, self.on_depth, qos_profile_sensor_data
+            depth_msg_type, depth_topic, self.on_depth, realtime_qos
         )
 
         self.debug_pub = None
@@ -309,6 +316,12 @@ class KeypointNode(Node):
 
     def on_depth(self, msg: Any):
         try:
+            msg_stamp_sec = self._stamp_to_sec(msg.header.stamp)
+            if np.isfinite(msg_stamp_sec) and msg_stamp_sec > 0.0:
+                if self.last_depth_msg_stamp_sec > 0.0 and msg_stamp_sec <= self.last_depth_msg_stamp_sec:
+                    return
+                self.last_depth_msg_stamp_sec = msg_stamp_sec
+
             use_depth_roi = bool(self.get_parameter('use_depth_roi').value)
             attach_depth = bool(self.get_parameter('attach_depth_to_keypoints').value)
             if not use_depth_roi and not attach_depth:
@@ -362,6 +375,12 @@ class KeypointNode(Node):
 
     def on_color(self, msg: Any):
         try:
+            msg_stamp_sec = self._stamp_to_sec(msg.header.stamp)
+            if np.isfinite(msg_stamp_sec) and msg_stamp_sec > 0.0:
+                if self.last_color_msg_stamp_sec > 0.0 and msg_stamp_sec <= self.last_color_msg_stamp_sec:
+                    return
+                self.last_color_msg_stamp_sec = msg_stamp_sec
+
             self.use_depth_roi = bool(self.get_parameter('use_depth_roi').value)
             bgr = self._decode_color_bgr(msg)
             gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)

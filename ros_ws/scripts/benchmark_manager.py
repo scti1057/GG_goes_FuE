@@ -936,17 +936,7 @@ class BenchmarkRuntime:
             f"prefilter_top_k:={self.node.prefilter_top_k}",
         ]
         filter_cmd = self._make_filter_cmd(self.node.default_filter_type)
-        controller_cmd = [
-            "ros2",
-            "run",
-            "ibvs_control",
-            "ibvs_twist_controller",
-            "--ros-args",
-            "-p",
-            "enable_motion:=false",
-            "-p",
-            "publish_wx_debug:=true",
-        ]
+        controller_cmd = self._make_controller_cmd(level="c", feature_source="filtered")
         return {
             "keypoint": ManagedProcess("keypoint", keypoint_cmd, self.log_dir / "keypoint.log"),
             "reference_manager": ManagedProcess(
@@ -960,6 +950,36 @@ class BenchmarkRuntime:
                 "ibvs_controller", controller_cmd, self.log_dir / "ibvs_controller.log"
             ),
         }
+
+    @staticmethod
+    def _false_dofs_for_level(level: str) -> list[str]:
+        lvl = str(level).strip().lower()
+        if lvl == "a":
+            return ["allow_wx", "allow_wy", "allow_wz"]
+        if lvl == "b":
+            return ["allow_wx", "allow_wy"]
+        return []
+
+    def _make_controller_cmd(self, level: str, feature_source: str) -> list[str]:
+        src = str(feature_source).strip().lower()
+        if src not in ("raw", "filtered"):
+            src = "filtered"
+        cmd = [
+            "ros2",
+            "run",
+            "ibvs_control",
+            "ibvs_twist_controller",
+            "--ros-args",
+            "-p",
+            "enable_motion:=false",
+            "-p",
+            "publish_wx_debug:=true",
+            "-p",
+            f"feature_source:={src}",
+        ]
+        for dof_param in self._false_dofs_for_level(level):
+            cmd += ["-p", f"{dof_param}:=false"]
+        return cmd
 
     def _make_filter_cmd(self, filter_type: str) -> list[str]:
         ft = str(filter_type).strip().lower()
@@ -1013,12 +1033,18 @@ class BenchmarkRuntime:
         self._start_proc("keypoint")
         self._start_proc("reference_manager")
 
-    def start_controller(self) -> None:
+    def start_controller(self, level: str, feature_source: str) -> bool:
+        self.processes["ibvs_controller"].cmd = self._make_controller_cmd(
+            level=level,
+            feature_source=feature_source,
+        )
         self._start_proc("ibvs_controller")
         if not self.wait_for_node(self.node.controller_node_name, timeout_sec=8.0):
             print(f"[proc] controller node did not appear: {self.node.controller_node_name}")
-            return
-        self.set_controller_enable_motion(False)
+            return False
+        if not self.set_controller_enable_motion(False):
+            print("[proc] warning: could not force enable_motion=false after start.")
+        return True
 
     def stop_controller(self) -> None:
         if self.processes["ibvs_controller"].is_running():
@@ -1518,9 +1544,9 @@ def execute_manual_benchmark(
             scenario_key=scenario_key,
         )
 
-        runtime.start_controller()
-        if not runtime.wait_for_node(node.controller_node_name, timeout_sec=6.0):
-            print("[manual] controller node did not become ready. abort remaining runs.")
+        feature_source = "raw" if stage_choice == "1" else "filtered"
+        if not runtime.start_controller(level=level_choice, feature_source=feature_source):
+            print("[manual] controller start failed. abort remaining runs.")
             node.run_goal_reached = False
             node.run_timed_out = True
             summary = node.stop_run_csv()
@@ -1536,40 +1562,6 @@ def execute_manual_benchmark(
             )
             break
         _sleep_with_spin(node, 0.8)
-        if not runtime.set_controller_level(level_choice):
-            print("[manual] failed to set controller level flags. abort remaining runs.")
-            node.run_goal_reached = False
-            node.run_timed_out = True
-            runtime.stop_controller()
-            summary = node.stop_run_csv()
-            print(
-                "[manual] run done "
-                f"goal_reached={summary['run_goal_reached']} "
-                f"timed_out={summary['run_timed_out']} "
-                f"filter_rejects={summary['filter_reject_count']} "
-                f"lr_attempts={summary['local_rescue_attempts_delta']} "
-                f"lr_success={summary['local_rescue_success_delta']} "
-                f"lr_reject={summary['local_rescue_reject_delta']} "
-                f"csv={csv_path}"
-            )
-            break
-        if not runtime.set_controller_feature_source("raw" if stage_choice == "1" else "filtered"):
-            print("[manual] failed to set controller feature_source. abort remaining runs.")
-            node.run_goal_reached = False
-            node.run_timed_out = True
-            runtime.stop_controller()
-            summary = node.stop_run_csv()
-            print(
-                "[manual] run done "
-                f"goal_reached={summary['run_goal_reached']} "
-                f"timed_out={summary['run_timed_out']} "
-                f"filter_rejects={summary['filter_reject_count']} "
-                f"lr_attempts={summary['local_rescue_attempts_delta']} "
-                f"lr_success={summary['local_rescue_success_delta']} "
-                f"lr_reject={summary['local_rescue_reject_delta']} "
-                f"csv={csv_path}"
-            )
-            break
         if not runtime.set_controller_enable_motion(True):
             print("[manual] failed to enable controller motion. abort remaining runs.")
             node.run_goal_reached = False
@@ -1588,8 +1580,27 @@ def execute_manual_benchmark(
             )
             break
         start_wait = time.time()
+        # Manual light cues for the operator:
+        # - scenario 3: "light on" at +4s
+        # - scenario 4: "light on" at +4s, "lights off" +6s later
+        light_on_deadline: Optional[float] = None
+        lights_off_deadline: Optional[float] = None
+        light_on_done = False
+        lights_off_done = False
+        if scenario_choice in ("3", "4"):
+            light_on_deadline = start_wait + 4.0
+        if scenario_choice == "4":
+            lights_off_deadline = start_wait + 6.0
+
         reached = False
         while rclpy.ok() and (time.time() - start_wait) <= node.benchmark_timeout_sec:
+            now = time.time()
+            if light_on_deadline is not None and (not light_on_done) and now >= light_on_deadline:
+                print("light on")
+                light_on_done = True
+            if lights_off_deadline is not None and (not lights_off_done) and now >= lights_off_deadline:
+                print("lights off")
+                lights_off_done = True
             rclpy.spin_once(node, timeout_sec=0.05)
             if node.goal_reached_state:
                 reached = True
