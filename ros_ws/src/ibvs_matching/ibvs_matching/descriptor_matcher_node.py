@@ -1,3 +1,6 @@
+import csv
+import os
+import time
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -45,7 +48,7 @@ class DescriptorMatcherNode(Node):
 
         # Runtime switch for benchmarking.
         self.declare_parameter("local_rescue_mode", "off")  # off | shadow | active
-        self.declare_parameter("max_local_rescues_per_frame", 12)
+        self.declare_parameter("max_local_rescues_per_frame", 20)
         self.declare_parameter("filtered_timeout_sec", 0.25)
 
         # Legacy fixed gates (used when adaptive gates are disabled).
@@ -62,7 +65,7 @@ class DescriptorMatcherNode(Node):
 
         # Per-keypoint uncertainty normalization (sigma_px from filtered_features.sim).
         self.declare_parameter("kp_sigma_low_px", 1.5)
-        self.declare_parameter("kp_sigma_high_px", 25.0)
+        self.declare_parameter("kp_sigma_high_px", 50.0)
 
         # Ambiguity checks on the combined score.
         self.declare_parameter("local_ambiguity_min_score_gap", 0.06)
@@ -82,6 +85,9 @@ class DescriptorMatcherNode(Node):
         self.declare_parameter("publish_local_rescue_debug", True)
         self.declare_parameter("local_rescue_debug_topic", "/ibvs/matching/local_rescue_debug")
         self.declare_parameter("local_rescue_debug_max_candidates_per_entry", 8)
+        self.declare_parameter("log_local_rescue_u_csv", False)
+        self.declare_parameter("log_local_rescue_u_csv_path", "")
+        self.declare_parameter("log_local_rescue_u_flush_rows", 20)
         self.declare_parameter("prefilter_enabled", False)
         self.declare_parameter("prefilter_top_k", 100)
         self.declare_parameter("prefilter_window_frames", 180)
@@ -118,6 +124,10 @@ class DescriptorMatcherNode(Node):
         self.prefilter_tracks: dict[int, PrefilterTrack] = {}
         self.prefilter_frame_idx: int = 0
         self.prefilter_last_log_sec: float = -1.0
+        self._u_log_file = None
+        self._u_log_writer = None
+        self._u_log_path = ""
+        self._u_log_rows_since_flush = 0
 
         kp_topic = str(self.get_parameter("keypoints_topic").value)
         ref_topic = str(self.get_parameter("reference_topic").value)
@@ -275,6 +285,121 @@ class DescriptorMatcherNode(Node):
 
     def _prefilter_enabled(self) -> bool:
         return bool(self.get_parameter("prefilter_enabled").value)
+
+    def _is_u_csv_logging_enabled(self) -> bool:
+        return bool(self.get_parameter("log_local_rescue_u_csv").value)
+
+    def _resolve_u_log_path(self) -> str:
+        configured = str(self.get_parameter("log_local_rescue_u_csv_path").value).strip()
+        if configured:
+            return configured
+        if self._u_log_path:
+            return self._u_log_path
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        return f"/home/ros_ws/logs/benchmark_csv/local_rescue_u_{ts}.csv"
+
+    def _close_u_log_file(self) -> None:
+        if self._u_log_file is None:
+            self._u_log_writer = None
+            self._u_log_path = ""
+            self._u_log_rows_since_flush = 0
+            return
+        try:
+            self._u_log_file.flush()
+            self._u_log_file.close()
+        except Exception:
+            pass
+        self._u_log_file = None
+        self._u_log_writer = None
+        self._u_log_path = ""
+        self._u_log_rows_since_flush = 0
+
+    def _open_u_log_file(self, path: str) -> bool:
+        try:
+            out_path = os.path.abspath(os.path.expanduser(path))
+            out_dir = os.path.dirname(out_path)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            f = open(out_path, "w", newline="", encoding="utf-8")
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "wall_time_sec",
+                    "mode",
+                    "frame_idx",
+                    "ref_id",
+                    "sigma_px",
+                    "u",
+                    "radius_eff_px",
+                    "sim_threshold_eff",
+                    "status",
+                ]
+            )
+            f.flush()
+        except Exception as exc:
+            self.get_logger().warn(f"Could not open local-rescue u CSV '{path}': {exc}")
+            return False
+
+        self._u_log_file = f
+        self._u_log_writer = writer
+        self._u_log_path = out_path
+        self._u_log_rows_since_flush = 0
+        self.get_logger().info(f"Local-rescue u CSV logging enabled: {out_path}")
+        return True
+
+    def _sync_u_log_state(self) -> None:
+        enabled = self._is_u_csv_logging_enabled()
+        if not enabled:
+            if self._u_log_file is not None:
+                self._close_u_log_file()
+                self.get_logger().info("Local-rescue u CSV logging disabled.")
+            return
+
+        target_path = self._resolve_u_log_path()
+        target_abs = os.path.abspath(os.path.expanduser(target_path))
+        if self._u_log_file is None:
+            self._open_u_log_file(target_abs)
+            return
+
+        if target_abs != self._u_log_path:
+            self._close_u_log_file()
+            self._open_u_log_file(target_abs)
+
+    def _log_u_sample(
+        self,
+        mode: str,
+        ref_id: int,
+        sigma_px: float,
+        u: float,
+        radius_eff: float,
+        sim_thr_eff: float,
+        status: str,
+    ) -> None:
+        self._sync_u_log_state()
+        if self._u_log_writer is None:
+            return
+        try:
+            self._u_log_writer.writerow(
+                [
+                    f"{self._now_sec():.6f}",
+                    str(mode),
+                    int(self.prefilter_frame_idx),
+                    int(ref_id),
+                    f"{float(sigma_px):.6f}",
+                    f"{float(u):.6f}",
+                    f"{float(radius_eff):.6f}",
+                    f"{float(sim_thr_eff):.6f}",
+                    str(status),
+                ]
+            )
+            self._u_log_rows_since_flush += 1
+            flush_rows = max(1, int(self.get_parameter("log_local_rescue_u_flush_rows").value))
+            if self._u_log_rows_since_flush >= flush_rows:
+                self._u_log_file.flush()
+                self._u_log_rows_since_flush = 0
+        except Exception as exc:
+            self.get_logger().warn(f"Failed to write local-rescue u CSV row: {exc}")
+            self._close_u_log_file()
 
     def _prefilter_prune_tracks(self):
         if not self.prefilter_tracks:
@@ -591,6 +716,7 @@ class DescriptorMatcherNode(Node):
 
     def _run_local_rescue(
         self,
+        mode: str,
         kpts: np.ndarray,
         desc: np.ndarray,
         assigned_cur: set[int],
@@ -642,11 +768,29 @@ class DescriptorMatcherNode(Node):
 
             if rid in assigned_ref:
                 entry.status = "SKIP_ASSIGNED_REF"
+                self._log_u_sample(
+                    mode,
+                    rid,
+                    sigma_px,
+                    u,
+                    radius_eff,
+                    sim_thr_eff,
+                    entry.status,
+                )
                 debug_entries.append(entry)
                 continue
 
             if rid < 0 or rid >= self.ref_desc.shape[0]:
                 entry.status = "SKIP_INVALID_REF"
+                self._log_u_sample(
+                    mode,
+                    rid,
+                    sigma_px,
+                    u,
+                    radius_eff,
+                    sim_thr_eff,
+                    entry.status,
+                )
                 debug_entries.append(entry)
                 continue
 
@@ -655,12 +799,30 @@ class DescriptorMatcherNode(Node):
             cand_all = np.where(d2 <= radius2)[0]
             if cand_all.size <= 0:
                 entry.status = "NO_CANDIDATES"
+                self._log_u_sample(
+                    mode,
+                    rid,
+                    sigma_px,
+                    u,
+                    radius_eff,
+                    sim_thr_eff,
+                    entry.status,
+                )
                 debug_entries.append(entry)
                 continue
 
             cand_idx = [int(idx) for idx in cand_all.tolist() if int(idx) not in assigned_cur]
             if not cand_idx:
                 entry.status = "ALL_ASSIGNED_CUR"
+                self._log_u_sample(
+                    mode,
+                    rid,
+                    sigma_px,
+                    u,
+                    radius_eff,
+                    sim_thr_eff,
+                    entry.status,
+                )
                 debug_entries.append(entry)
                 continue
 
@@ -674,6 +836,15 @@ class DescriptorMatcherNode(Node):
             valid = (sims >= sim_floor) & (sims >= sim_thr_eff)
             if not np.any(valid):
                 entry.status = "ALL_FAIL_GATES"
+                self._log_u_sample(
+                    mode,
+                    rid,
+                    sigma_px,
+                    u,
+                    radius_eff,
+                    sim_thr_eff,
+                    entry.status,
+                )
                 debug_entries.append(entry)
                 continue
 
@@ -720,6 +891,15 @@ class DescriptorMatcherNode(Node):
                 entry.score_ratio = ratio
                 if (gap < min_gap) or (ratio < min_ratio):
                     entry.status = "AMBIGUOUS"
+                    self._log_u_sample(
+                        mode,
+                        rid,
+                        sigma_px,
+                        u,
+                        radius_eff,
+                        sim_thr_eff,
+                        entry.status,
+                    )
                     debug_entries.append(entry)
                     continue
 
@@ -729,6 +909,15 @@ class DescriptorMatcherNode(Node):
             successes += 1
 
             entry.status = "RESCUED"
+            self._log_u_sample(
+                mode,
+                rid,
+                sigma_px,
+                u,
+                radius_eff,
+                sim_thr_eff,
+                entry.status,
+            )
             debug_entries.append(entry)
 
             if len(rescues) >= max_rescues:
@@ -807,6 +996,7 @@ class DescriptorMatcherNode(Node):
         self.pub_rejects.publish(m_reject)
 
     def on_keypoints(self, msg: Keypoints):
+        self._sync_u_log_state()
         stamp_sec = self._stamp_to_sec(msg.header.stamp)
         if np.isfinite(stamp_sec) and stamp_sec > 0.0:
             if self.last_keypoints_msg_stamp_sec > 0.0 and stamp_sec <= self.last_keypoints_msg_stamp_sec:
@@ -886,6 +1076,7 @@ class DescriptorMatcherNode(Node):
         local_context_ready, filtered_stale = self._local_context_status()
         if local_context_ready:
             rescues, local_attempts, local_successes, debug_entries = self._run_local_rescue(
+                mode,
                 kpts,
                 desc,
                 assigned_cur,
@@ -950,6 +1141,10 @@ class DescriptorMatcherNode(Node):
             local_successes,
             local_applied,
         )
+
+    def destroy_node(self):
+        self._close_u_log_file()
+        return super().destroy_node()
 
 
 def main():

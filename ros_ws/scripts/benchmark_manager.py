@@ -1727,9 +1727,9 @@ def execute_manual_benchmark(
         light_on_done = False
         lights_off_done = False
         if scenario_choice in ("3", "4"):
-            light_on_deadline = start_wait + 4.0
+            light_on_deadline = start_wait + 3.0
         if scenario_choice == "4":
-            lights_off_deadline = start_wait + 6.0
+            lights_off_deadline = start_wait + 5.0
 
         reached = False
         while rclpy.ok() and (time.time() - start_wait) <= node.benchmark_timeout_sec:

@@ -34,6 +34,8 @@ class FilterDebugNode(Node):
         self.declare_parameter('debug_image_topic', '/ibvs/filter_debug_image')
         self.declare_parameter('debug_image_publish_rate', 30.0)
         self.declare_parameter('max_draw_points', 250)
+        self.declare_parameter('min_init_keypoints', 8)
+        self.declare_parameter('min_update_keypoints', 4)
 
         self.image_topic = str(self.get_parameter('image_topic').value)
         self.reference_topic = str(self.get_parameter('reference_topic').value)
@@ -56,6 +58,8 @@ class FilterDebugNode(Node):
             self.get_parameter('debug_image_publish_rate').value
         )
         self.max_draw_points = int(self.get_parameter('max_draw_points').value)
+        self.min_init_keypoints = int(self.get_parameter('min_init_keypoints').value)
+        self.min_update_keypoints = int(self.get_parameter('min_update_keypoints').value)
 
         self.cv_bridge = CvBridge()
         self.lock = threading.Lock()
@@ -202,6 +206,27 @@ class FilterDebugNode(Node):
         )
         return np.asarray(msg.ref_id[:n], dtype=np.int64), cur[:n], depth_m
 
+    @staticmethod
+    def _clean_unique_ref_ids(ref_ids: np.ndarray, reference_xy: Optional[np.ndarray]) -> np.ndarray:
+        if ref_ids.size <= 0:
+            return np.zeros((0,), dtype=np.int64)
+        ref_max = reference_xy.shape[0] if reference_xy is not None else None
+        seen: set[int] = set()
+        unique_ids: list[int] = []
+        for rid in ref_ids.tolist():
+            ref_idx = int(rid)
+            if ref_idx < 0:
+                continue
+            if ref_max is not None and ref_idx >= ref_max:
+                continue
+            if ref_idx in seen:
+                continue
+            seen.add(ref_idx)
+            unique_ids.append(ref_idx)
+        if not unique_ids:
+            return np.zeros((0,), dtype=np.int64)
+        return np.asarray(unique_ids, dtype=np.int64)
+
     def on_reference(self, msg: Keypoints):
         xy = np.asarray(msg.xy, dtype=np.float32)
         if xy.size % 2 != 0:
@@ -271,6 +296,15 @@ class FilterDebugNode(Node):
             update_success_count = self.update_success_count
             active_count = self.active_count
 
+        clean_raw_ids = self._clean_unique_ref_ids(raw_ref_ids, reference_xy)
+        clean_filtered_ids = self._clean_unique_ref_ids(filtered_ref_ids, reference_xy)
+        observed_active_tracks = int(
+            np.intersect1d(clean_raw_ids, clean_filtered_ids, assume_unique=False).size
+        )
+        clean_unique_matches = int(clean_raw_ids.size)
+        relocalize_triggered = observed_active_tracks < int(self.min_update_keypoints)
+        relocalize_can_init = clean_unique_matches >= int(self.min_init_keypoints)
+
         self._draw_overlay(
             cv_img,
             reference_xy,
@@ -285,6 +319,10 @@ class FilterDebugNode(Node):
             update_count,
             update_success_count,
             active_count,
+            clean_unique_matches,
+            observed_active_tracks,
+            relocalize_triggered,
+            relocalize_can_init,
         )
 
         out_msg = self.cv_bridge.cv2_to_imgmsg(cv_img, 'bgr8')
@@ -306,6 +344,10 @@ class FilterDebugNode(Node):
         update_count,
         update_success_count,
         active_count,
+        clean_unique_matches,
+        observed_active_tracks,
+        relocalize_triggered,
+        relocalize_can_init,
     ):
         max_draw = max(1, int(self.max_draw_points))
 
@@ -342,7 +384,7 @@ class FilterDebugNode(Node):
             status_name = right.strip()
 
         overlay = cv_img.copy()
-        box_w, box_h = 400, 315
+        box_w, box_h = 500, 390
         cv2.rectangle(overlay, (5, 5), (5 + box_w, 5 + box_h), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.4, cv_img, 0.6, 0, cv_img)
 
@@ -370,7 +412,27 @@ class FilterDebugNode(Node):
         y_txt += line_h
         cv2.putText(
             cv_img,
+            f'Clean unique matches: {clean_unique_matches} (min_init={self.min_init_keypoints})',
+            (x_txt, y_txt),
+            font,
+            0.5,
+            (255, 255, 255),
+            1,
+        )
+        y_txt += line_h
+        cv2.putText(
+            cv_img,
             f'Filtered points: {filtered_ref_ids.size}',
+            (x_txt, y_txt),
+            font,
+            0.5,
+            (255, 255, 255),
+            1,
+        )
+        y_txt += line_h
+        cv2.putText(
+            cv_img,
+            f'Observed active tracks: {observed_active_tracks} (min_update={self.min_update_keypoints})',
             (x_txt, y_txt),
             font,
             0.5,
@@ -387,6 +449,30 @@ class FilterDebugNode(Node):
             font,
             0.5,
             (255, 255, 255),
+            1,
+        )
+        y_txt += line_h
+        trigger_txt = "YES" if relocalize_triggered else "NO"
+        trigger_col = (0, 200, 255) if relocalize_triggered else (140, 255, 140)
+        cv2.putText(
+            cv_img,
+            f'Below min_update -> relocalize path: {trigger_txt}',
+            (x_txt, y_txt),
+            font,
+            0.5,
+            trigger_col,
+            1,
+        )
+        y_txt += line_h
+        can_init_txt = "YES" if relocalize_can_init else "NO"
+        can_init_col = (140, 255, 140) if relocalize_can_init else (0, 120, 255)
+        cv2.putText(
+            cv_img,
+            f'Relocalize can init new set: {can_init_txt}',
+            (x_txt, y_txt),
+            font,
+            0.5,
+            can_init_col,
             1,
         )
         y_txt += line_h
