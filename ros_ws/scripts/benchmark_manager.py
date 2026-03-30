@@ -1719,27 +1719,36 @@ def execute_manual_benchmark(
             )
             break
         start_wait = time.time()
-        # Manual light cues for the operator:
-        # - scenario 3: "light on" at +4s
-        # - scenario 4: "light on" at +4s, "lights off" +6s later
-        light_on_deadline: Optional[float] = None
-        lights_off_deadline: Optional[float] = None
-        light_on_done = False
-        lights_off_done = False
-        if scenario_choice in ("3", "4"):
-            light_on_deadline = start_wait + 3.0
-        if scenario_choice == "4":
-            lights_off_deadline = start_wait + 5.0
+        # Manual light cues for the operator.
+        # Scenario 3 custom sequence:
+        #   +1.5s: "lights on"
+        #   +2.5s: "light off"
+        #   +3.5s: "light on"
+        #   +4.5s: "lights off"
+        # Scenario 4 legacy sequence:
+        #   +3.0s: "light on"
+        #   +5.0s: "lights off"
+        light_events: list[tuple[float, str]] = []
+        if scenario_choice == "3":
+            light_events = [
+                (start_wait + 1.5, "lights on"),
+                (start_wait + 2.5, "light off"),
+                (start_wait + 3.5, "light on"),
+                (start_wait + 4.5, "lights off"),
+            ]
+        elif scenario_choice == "4":
+            light_events = [
+                (start_wait + 3.0, "light on"),
+                (start_wait + 5.0, "lights off"),
+            ]
+        next_light_event = 0
 
         reached = False
         while rclpy.ok() and (time.time() - start_wait) <= node.benchmark_timeout_sec:
             now = time.time()
-            if light_on_deadline is not None and (not light_on_done) and now >= light_on_deadline:
-                print("light on")
-                light_on_done = True
-            if lights_off_deadline is not None and (not lights_off_done) and now >= lights_off_deadline:
-                print("lights off")
-                lights_off_done = True
+            while next_light_event < len(light_events) and now >= light_events[next_light_event][0]:
+                print(light_events[next_light_event][1])
+                next_light_event += 1
             rclpy.spin_once(node, timeout_sec=0.05)
             if node.goal_reached_state:
                 reached = True

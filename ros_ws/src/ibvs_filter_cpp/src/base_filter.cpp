@@ -20,6 +20,7 @@ BaseFilter::BaseFilter(const Eigen::Matrix3d & K)
   active_desired_(Eigen::MatrixXd::Zero(2, 0)),
   max_active_keypoints_(80),
   min_init_keypoints_(8),
+  min_reinit_unique_matches_(8),
   min_update_keypoints_(4)
 {
 }
@@ -48,10 +49,12 @@ void BaseFilter::configureKeypointTracking(
   int min_update_keypoints)
 {
   max_active_keypoints_ = std::max(4, max_active_keypoints);
-  min_init_keypoints_ = std::max(4, min_init_keypoints);
+  min_reinit_unique_matches_ = std::max(4, min_init_keypoints);
+  // Keep startup behavior stable: initial model build still uses a threshold
+  // clamped by active-set size, while reinit can require more unique matches.
+  min_init_keypoints_ = std::min(min_reinit_unique_matches_, max_active_keypoints_);
   min_update_keypoints_ = std::max(0, min_update_keypoints);
 
-  min_init_keypoints_ = std::min(min_init_keypoints_, max_active_keypoints_);
   min_update_keypoints_ = std::min(min_update_keypoints_, max_active_keypoints_);
 }
 
@@ -169,7 +172,8 @@ std::optional<Eigen::MatrixXd> BaseFilter::initializeActiveSet(
   const Eigen::MatrixXd & current_pixels,
   const Eigen::MatrixXd & desired_pixels,
   const std::vector<int64_t> & ref_ids,
-  const Eigen::VectorXd & match_scores)
+  const Eigen::VectorXd & match_scores,
+  bool strict_reinit_threshold)
 {
   int m = static_cast<int>(desired_pixels.cols());
   if (m <= 0) {
@@ -211,7 +215,9 @@ std::optional<Eigen::MatrixXd> BaseFilter::initializeActiveSet(
   }
 
   m = static_cast<int>(desired_unique.cols());
-  if (m < min_init_keypoints_) {
+  const int required_unique =
+    strict_reinit_threshold ? min_reinit_unique_matches_ : min_init_keypoints_;
+  if (m < required_unique) {
     return std::nullopt;
   }
 
@@ -271,7 +277,8 @@ std::optional<MeasurementData> BaseFilter::prepareMeasurement(
   }
 
   if (active_ref_ids_.empty()) {
-    auto current_selected = initializeActiveSet(current, desired, ids, scores);
+    // Initial startup: keep legacy/tolerant init threshold behavior.
+    auto current_selected = initializeActiveSet(current, desired, ids, scores, false);
     if (!current_selected.has_value()) {
       return std::nullopt;
     }
@@ -310,7 +317,8 @@ std::optional<MeasurementData> BaseFilter::prepareMeasurement(
   }
 
   if (static_cast<int>(obs_slots.size()) < min_update_keypoints_) {
-    auto current_selected = initializeActiveSet(current, desired, ids, scores);
+    // Reinit after tracking loss: require strict unique-match threshold.
+    auto current_selected = initializeActiveSet(current, desired, ids, scores, true);
     if (!current_selected.has_value()) {
       return std::nullopt;
     }

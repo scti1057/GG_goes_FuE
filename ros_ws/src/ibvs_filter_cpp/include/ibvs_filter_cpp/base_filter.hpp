@@ -71,6 +71,7 @@ protected:
 
   int max_active_keypoints_;
   int min_init_keypoints_;
+  int min_reinit_unique_matches_;
   int min_update_keypoints_;
 
 private:
@@ -83,7 +84,8 @@ private:
     const Eigen::MatrixXd & current_pixels,
     const Eigen::MatrixXd & desired_pixels,
     const std::vector<int64_t> & ref_ids,
-    const Eigen::VectorXd & match_scores);
+    const Eigen::VectorXd & match_scores,
+    bool strict_reinit_threshold);
 
   static Eigen::VectorXd stackMeasurement(const Eigen::MatrixXd & current_obs);
   bool checkGeometryAndUpdateH(const Eigen::VectorXd & state_2n, bool log_on_fail) ;
