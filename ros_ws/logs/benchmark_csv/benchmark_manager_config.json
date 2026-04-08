@@ -15,8 +15,8 @@
   "filter_camera_velocity_topic": "/cartesian_twist_passthrough_controller/cmd_vel",
   "filter_gate_threshold": 3.0,
   "filter_max_active_keypoints": 30,
-  "filter_min_init_keypoints": 140,
-  "filter_min_update_keypoints": 10,
+  "filter_min_init_keypoints": 160,
+  "filter_min_update_keypoints": 15,
   "filter_node_name": "/ibvs_filter_node",
   "filter_predict_rate": 30.0,
   "filter_q_noise": 2.0,
@@ -25,15 +25,15 @@
   "goal_hold_sec": 0.1,
   "goal_pose": {
     "quat_xyzw": [
-      -0.013130839622299167,
-      0.9999137866504606,
-      1.4412119947602571e-05,
-      1.0461432355150268e-05
+      -0.011855130742676098,
+      0.9999297254511967,
+      5.626467206060041e-07,
+      5.818254703832776e-06
     ],
     "xyz": [
-      -0.016097042244149446,
-      -0.5962925130056822,
-      0.3912084530283757
+      0.02660621672422962,
+      -0.6967121667897919,
+      0.41408200055256084
     ]
   },
   "goal_reached_topic": "/ibvs/control/goal_reached",
@@ -62,15 +62,15 @@
   "reference_topic": "/ibvs/reference/keypoints",
   "start_pose": {
     "quat_xyzw": [
-      0.013162398917205087,
-      -0.9999133718265386,
-      -2.667214796520594e-07,
-      9.85674925425716e-06
+      0.2281559300602545,
+      -0.9472455504071191,
+      0.18527229936977077,
+      0.1278472287478005
     ],
     "xyz": [
-      0.17382125370590132,
-      -0.5962879855766426,
-      0.3912115871254322
+      0.06954355588554668,
+      -0.4771249016647557,
+      0.33480399010640133
     ]
   },
   "tracking_keep_aligned_depth": true,

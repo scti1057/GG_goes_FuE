@@ -34,8 +34,8 @@ class FilterDebugNode(Node):
         self.declare_parameter('debug_image_topic', '/ibvs/filter_debug_image')
         self.declare_parameter('debug_image_publish_rate', 30.0)
         self.declare_parameter('max_draw_points', 250)
-        self.declare_parameter('min_init_keypoints', 8)
-        self.declare_parameter('min_update_keypoints', 4)
+        self.declare_parameter('min_init_keypoints', 160)
+        self.declare_parameter('min_update_keypoints', 15)
 
         self.image_topic = str(self.get_parameter('image_topic').value)
         self.reference_topic = str(self.get_parameter('reference_topic').value)
